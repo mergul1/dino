@@ -33,6 +33,7 @@ from PIL import Image
 
 import utils
 import vision_transformer as vits
+from arguments import parse_arguments
 
 
 def apply_mask(image, mask, color, alpha=0.5):
@@ -96,24 +97,31 @@ def display_instances(image, mask, fname="test", figsize=(5, 5), blur=False, con
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser('Visualize Self-Attention maps')
-    parser.add_argument('--arch', default='vit_small', type=str,
-        choices=['vit_tiny', 'vit_small', 'vit_base'], help='Architecture (support only ViT atm).')
-    parser.add_argument('--patch_size', default=8, type=int, help='Patch resolution of the model.')
-    parser.add_argument('--pretrained_weights', default='', type=str,
-        help="Path to pretrained weights to load.")
-    parser.add_argument("--checkpoint_key", default="teacher", type=str,
-        help='Key to use in the checkpoint (example: "teacher")')
-    parser.add_argument("--image_path", default=None, type=str, help="Path of the image to load.")
-    parser.add_argument("--image_size", default=(480, 480), type=int, nargs="+", help="Resize image.")
-    parser.add_argument('--output_dir', default='.', help='Path where to save visualizations.')
-    parser.add_argument("--threshold", type=float, default=None, help="""We visualize masks
-        obtained by thresholding the self-attention maps to keep xx% of the mass.""")
+    # parser = argparse.ArgumentParser('Visualize Self-Attention maps')
+    parser = argparse.ArgumentParser('ViT_WSL', parents=[parse_arguments()])
+
+    # parser.add_argument('--arch', default='vit_small', type=str, choices=['vit_tiny', 'vit_small', 'vit_base'],
+    #                     help='Architecture (support only ViT atm).')
+    # parser.add_argument('--patch_size', default=8, type=int,
+    #                     help='Patch resolution of the model.')
+    # parser.add_argument('--pretrained_weights', default='', type=str,
+    #                     help="Path to pretrained weights to load.")
+    # parser.add_argument("--checkpoint_key", default="teacher", type=str,
+    #                     help='Key to use in the checkpoint (example: "teacher")')
+    parser.add_argument("--image_path", default=None, type=str,
+                        help="Path of the image to load.")
+    parser.add_argument("--image_size", default=(480, 480), type=int, nargs="+",
+                        help="Resize image.")
+    parser.add_argument('--output_dirs', default='outs',
+                        help='Path where to save visualizations.')
+    parser.add_argument("--threshold", type=float, default=None, help="""We visualize masks obtained by thresholding 
+    the self-attention maps to keep xx% of the mass.""")
     args = parser.parse_args()
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+
     # build model
-    model = vits.__dict__[args.arch](patch_size=args.patch_size, num_classes=0)
+    model = vits.__dict__[args.arch](args=args)
     for p in model.parameters():
         p.requires_grad = False
     model.eval()
@@ -200,14 +208,14 @@ if __name__ == '__main__':
     attentions = nn.functional.interpolate(attentions.unsqueeze(0), scale_factor=args.patch_size, mode="nearest")[0].cpu().numpy()
 
     # save attentions heatmaps
-    os.makedirs(args.output_dir, exist_ok=True)
-    torchvision.utils.save_image(torchvision.utils.make_grid(img, normalize=True, scale_each=True), os.path.join(args.output_dir, "img.png"))
+    os.makedirs(args.output_dirs, exist_ok=True)
+    torchvision.utils.save_image(torchvision.utils.make_grid(img, normalize=True, scale_each=True), os.path.join(args.output_dirs, "img.png"))
     for j in range(nh):
-        fname = os.path.join(args.output_dir, "attn-head" + str(j) + ".png")
+        fname = os.path.join(args.output_dirs, "attn-head" + str(j) + ".png")
         plt.imsave(fname=fname, arr=attentions[j], format='png')
         print(f"{fname} saved.")
 
     if args.threshold is not None:
-        image = skimage.io.imread(os.path.join(args.output_dir, "img.png"))
+        image = skimage.io.imread(os.path.join(args.output_dirs, "img.png"))
         for j in range(nh):
-            display_instances(image, th_attn[j], fname=os.path.join(args.output_dir, "mask_th" + str(args.threshold) + "_head" + str(j) +".png"), blur=False)
+            display_instances(image, th_attn[j], fname=os.path.join(args.output_dirs, "mask_th" + str(args.threshold) + "_head" + str(j) +".png"), blur=False)

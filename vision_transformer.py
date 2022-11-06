@@ -20,11 +20,15 @@ from functools import partial
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-from utils import trunc_normal_
+from utils.train_tools import load_pretrained, trunc_normal_
+
+# torch.backends.cudnn.benchmark = True
+# torch.backends.cudnn.enabled = True
 
 
-def drop_path(x, drop_prob: float = 0., training: bool = False):
+def drop_path(x, drop_prob=0., training=False):
     if drop_prob == 0. or not training:
         return x
     keep_prob = 1 - drop_prob
@@ -36,8 +40,7 @@ def drop_path(x, drop_prob: float = 0., training: bool = False):
 
 
 class DropPath(nn.Module):
-    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
-    """
+    """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks). """
     def __init__(self, drop_prob=None):
         super(DropPath, self).__init__()
         self.drop_prob = drop_prob
@@ -77,45 +80,63 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x):
-        B, N, C = x.shape
-        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        self.attn = None
+        self.attn_gradients = None
+
+    def get_attn(self):
+        return self.attn
+
+    def save_attn(self, attn):
+        self.attn = attn
+
+    def save_attn_gradients(self, attn_gradients):
+        self.attn_gradients = attn_gradients
+
+    def get_attn_gradients(self):
+        return self.attn_gradients
+
+    def forward(self, x, register_hook=False):
+        batch_size, num_tokens, embed_dims = x.shape
+        qkv = self.qkv(x).reshape(batch_size, num_tokens, 3, self.num_heads, embed_dims // self.num_heads)
+        qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
-        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
+        if register_hook:
+            self.save_attn(attn)
+            attn.register_hook(self.save_attn_gradients)
+
+        x = (attn @ v).transpose(1, 2).reshape(batch_size, num_tokens, embed_dims)
         x = self.proj(x)
         x = self.proj_drop(x)
-        return x, attn
+        return x
 
 
 class Block(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+                 drop_path_rate=0., act_layer=nn.GELU, norm_layer=partial(nn.LayerNorm, eps=1e-6)):
         super().__init__()
         self.norm1 = norm_layer(dim)
         self.attn = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
-        self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop
+        )
+        self.drop_path = DropPath(drop_path_rate) if drop_path_rate > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, x, return_attention=False):
-        y, attn = self.attn(self.norm1(x))
-        if return_attention:
-            return attn
+    def forward(self, x, register_hook=False):
+        y = self.attn(self.norm1(x), register_hook)
         x = x + self.drop_path(y)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
 
 
 class PatchEmbed(nn.Module):
-    """ Image to Patch Embedding
-    """
+    """ Image to Patch Embedding """
     def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768):
         super().__init__()
         num_patches = (img_size // patch_size) * (img_size // patch_size)
@@ -126,38 +147,56 @@ class PatchEmbed(nn.Module):
         self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
 
     def forward(self, x):
-        B, C, H, W = x.shape
-        x = self.proj(x).flatten(2).transpose(1, 2)
+        x = self.proj(x).flatten(start_dim=2).transpose(1, 2)
         return x
 
 
 class VisionTransformer(nn.Module):
     """ Vision Transformer """
-    def __init__(self, img_size=[224], patch_size=16, in_chans=3, num_classes=0, embed_dim=768, depth=12,
-                 num_heads=12, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0.,
-                 drop_path_rate=0., norm_layer=nn.LayerNorm, **kwargs):
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, num_classes=0, embed_dim=768, depth=12, num_heads=12,
+                 mlp_ratio=4., qkv_bias=False, qk_scale=None, drop_rate=0., attn_drop_rate=0., drop_path_rate=0.,
+                 norm_layer=partial(nn.LayerNorm, eps=1e-6), mlp_head=False, mask_guided=False, **kwargs):
         super().__init__()
+
+        # Model hyper-parameters
         self.num_features = self.embed_dim = embed_dim
+        self.patch_size = patch_size
+        self.num_classes = num_classes
 
+        # Patchify
         self.patch_embed = PatchEmbed(
-            img_size=img_size[0], patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
+            img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim
+        )
         num_patches = self.patch_embed.num_patches
+        self.num_patch_height = None
+        self.num_patch_width = None
 
+        # Class token
         self.cls_token = nn.Parameter(torch.zeros(1, 1, embed_dim))
+
+        # Position Encoding
         self.pos_embed = nn.Parameter(torch.zeros(1, num_patches + 1, embed_dim))
         self.pos_drop = nn.Dropout(p=drop_rate)
 
+        # Stochastic depth decay
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
+
+        # Transformer blocks
         self.blocks = nn.ModuleList([
             Block(
                 dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer)
-            for i in range(depth)])
+                drop=drop_rate, attn_drop=attn_drop_rate, drop_path_rate=dpr[i], norm_layer=norm_layer)
+            for i in range(depth)
+        ])
         self.norm = norm_layer(embed_dim)
 
         # Classifier head
-        self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
+        if mlp_head:
+            self.head = Mlp(embed_dim, int(embed_dim * mlp_ratio), num_classes)
+        else:
+            self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
+        # Initialize the weight parameters
         trunc_normal_(self.pos_embed, std=.02)
         trunc_normal_(self.cls_token, std=.02)
         self.apply(self._init_weights)
@@ -171,56 +210,98 @@ class VisionTransformer(nn.Module):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
 
-    def interpolate_pos_encoding(self, x, w, h):
+    def get_params_groups_(self):
+        regularized = []
+        not_regularized = []
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+            # we do not regularize biases nor Norm parameters
+            if name.endswith(".bias") or len(param.shape) == 1:
+                not_regularized.append(param)
+            else:
+                regularized.append(param)
+        return [{'params': regularized}, {'params': not_regularized, 'weight_decay': 0.}]
+
+    def get_params_groups(self):
+        regularized = []
+        not_regularized = []
+        scratch_weights = []
+        scratch_biases = []
+
+        for name, param in self.named_parameters():
+            if not param.requires_grad:
+                continue
+
+            # we can need different lr for scratch layers
+            if name.startswith('head'):
+                if name.endswith('.bias') or len(param.shape) == 1:
+                    scratch_biases.append(param)
+                else:
+                    scratch_weights.append(param)
+
+            # we do not regularize biases nor Norm parameters
+            elif name.endswith(".bias") or len(param.shape) == 1:
+                not_regularized.append(param)
+            else:
+                regularized.append(param)
+
+        return [{'params': regularized}, {'params': not_regularized, 'weight_decay': 0.},
+                {'params': scratch_weights}, {'params': scratch_biases, 'weight_decay': 0.}]
+
+    def interpolate_pos_encoding(self, x, height, width):
         npatch = x.shape[1] - 1
         N = self.pos_embed.shape[1] - 1
-        if npatch == N and w == h:
+        if npatch == N and height == width:
             return self.pos_embed
         class_pos_embed = self.pos_embed[:, 0]
         patch_pos_embed = self.pos_embed[:, 1:]
         dim = x.shape[-1]
-        w0 = w // self.patch_embed.patch_size
-        h0 = h // self.patch_embed.patch_size
+        self.num_patch_height = height // self.patch_embed.patch_size
+        self.num_patch_width = width // self.patch_embed.patch_size
         # we add a small number to avoid floating point error in the interpolation
         # see discussion at https://github.com/facebookresearch/dino/issues/8
-        w0, h0 = w0 + 0.1, h0 + 0.1
+        h0, w0 = self.num_patch_height + 0.1, self.num_patch_width + 0.1
         patch_pos_embed = nn.functional.interpolate(
             patch_pos_embed.reshape(1, int(math.sqrt(N)), int(math.sqrt(N)), dim).permute(0, 3, 1, 2),
-            scale_factor=(w0 / math.sqrt(N), h0 / math.sqrt(N)),
+            scale_factor=(h0 / math.sqrt(N), w0 / math.sqrt(N)),
             mode='bicubic',
         )
-        assert int(w0) == patch_pos_embed.shape[-2] and int(h0) == patch_pos_embed.shape[-1]
+        assert int(h0) == patch_pos_embed.shape[-2] and int(w0) == patch_pos_embed.shape[-1]
         patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
         return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1)
 
     def prepare_tokens(self, x):
-        B, nc, w, h = x.shape
+        batch_size, nc, height, width = x.shape
         x = self.patch_embed(x)  # patch linear embedding
 
         # add the [CLS] token to the embed patch tokens
-        cls_tokens = self.cls_token.expand(B, -1, -1)
+        cls_tokens = self.cls_token.expand(batch_size, -1, -1)
         x = torch.cat((cls_tokens, x), dim=1)
 
         # add positional encoding to each token
-        x = x + self.interpolate_pos_encoding(x, w, h)
+        x = x + self.interpolate_pos_encoding(x, height, width)
 
         return self.pos_drop(x)
 
-    def forward(self, x):
+    def forward(self, x, register_hook=False):
         x = self.prepare_tokens(x)
-        for blk in self.blocks:
-            x = blk(x)
-        x = self.norm(x)
-        return x[:, 0]
+        for i, blk in enumerate(self.blocks):
+            x = blk(x, register_hook=register_hook)
 
-    def get_last_selfattention(self, x):
+        x = self.norm(x)
+        class_token = x[:, 0]
+        class_score = self.head(class_token)
+        return class_score
+
+    def get_last_self_attention(self, x):
         x = self.prepare_tokens(x)
         for i, blk in enumerate(self.blocks):
             if i < len(self.blocks) - 1:
                 x = blk(x)
             else:
                 # return attention of the last block
-                return blk(x, return_attention=True)
+                return blk(x, register_hook=True)
 
     def get_intermediate_layers(self, x, n=1):
         x = self.prepare_tokens(x)
@@ -233,24 +314,51 @@ class VisionTransformer(nn.Module):
         return output
 
 
-def vit_tiny(patch_size=16, **kwargs):
+def vit_tiny(args, **kwargs):
     model = VisionTransformer(
-        patch_size=patch_size, embed_dim=192, depth=12, num_heads=3, mlp_ratio=4,
-        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+        img_size=args.img_size, patch_size=args.patch_size, num_classes=args.num_classes, embed_dim=192, depth=12,
+        num_heads=3, mlp_ratio=4, qkv_bias=True, mlp_head=args.mlp_head, mask_guided=args.mask_guided,
+        drop_rate=args.drop_rate, attn_drop_rate=args.attn_drop_rate, drop_path_rate=args.drop_path_rate,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs
+    )
+    if args.pretrained:
+        load_pretrained(model, args)
     return model
 
 
-def vit_small(patch_size=16, **kwargs):
+def vit_small(args, **kwargs):
     model = VisionTransformer(
-        patch_size=patch_size, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4,
-        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+        img_size=args.img_size, patch_size=args.patch_size, num_classes=args.num_classes, embed_dim=384, depth=12,
+        num_heads=6, mlp_ratio=4, qkv_bias=True, mlp_head=args.mlp_head, mask_guided=args.mask_guided,
+        drop_rate=args.drop_rate, attn_drop_rate=args.attn_drop_rate, drop_path_rate=args.drop_path_rate,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs
+    )
+    if args.pretrained:
+        load_pretrained(model, args)
     return model
 
 
-def vit_base(patch_size=16, **kwargs):
+def vit_base(args, **kwargs):
     model = VisionTransformer(
-        patch_size=patch_size, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4,
-        qkv_bias=True, norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
+        img_size=args.img_size, patch_size=args.patch_size, num_classes=args.num_classes, embed_dim=768, depth=12,
+        num_heads=12, mlp_ratio=4, qkv_bias=True, mlp_head=args.mlp_head, mask_guided=args.mask_guided,
+        drop_rate=args.drop_rate, attn_drop_rate=args.attn_drop_rate, drop_path_rate=args.drop_path_rate,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs
+    )
+    if args.pretrained:
+        load_pretrained(model, args)
+    return model
+
+
+def vit_large(args, **kwargs):
+    model = VisionTransformer(
+        img_size=args.img_size, patch_size=args.patch_size, num_classes=args.num_classes, embed_dim=1024, depth=24,
+        num_heads=16, mlp_ratio=4, qkv_bias=True, mlp_head=args.mlp_head, mask_guided=args.mask_guided,
+        drop_rate=args.drop_rate, attn_drop_rate=args.attn_drop_rate, drop_path_rate=args.drop_path_rate,
+        norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs
+    )
+    if args.pretrained:
+        load_pretrained(model, args)
     return model
 
 
