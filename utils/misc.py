@@ -8,6 +8,9 @@ import random
 import numpy as np
 
 import torch
+import torch.distributed as dist
+
+from train_tools import *
 
 
 def min_max_normalizer(tensor):
@@ -17,14 +20,12 @@ def min_max_normalizer(tensor):
 
 
 def bool_flag(s):
-    """
-    Parse boolean arguments from the command line.
-    """
-    FALSY_STRINGS = {"off", "false", "0"}
-    TRUTHY_STRINGS = {"on", "true", "1"}
-    if s.lower() in FALSY_STRINGS:
+    """ Parse boolean arguments from the command line. """
+    falsy_strings = {"off", "false", "0"}
+    truthy_strings = {"on", "true", "1"}
+    if s.lower() in falsy_strings:
         return False
-    elif s.lower() in TRUTHY_STRINGS:
+    elif s.lower() in truthy_strings:
         return True
     else:
         raise argparse.ArgumentTypeError("invalid value for a boolean flag")
@@ -76,3 +77,29 @@ to_2tuple = _ntuple(2)
 to_3tuple = _ntuple(3)
 to_4tuple = _ntuple(4)
 to_ntuple = _ntuple
+
+
+def reduce_dict(input_dict, average=True):
+    """
+    Args:
+        input_dict (dict): all the values will be reduced
+        average (bool): whether to do average or sum
+    Reduce the values in the dictionary from all processes so that all processes have the averaged results.
+    Returns a dict with the same fields as input_dict, after reduction.
+    """
+    world_size = get_world_size()
+    if world_size < 2:
+        return input_dict
+    with torch.no_grad():
+        names = []
+        values = []
+        # sort the keys so that they are consistent across processes
+        for k in sorted(input_dict.keys()):
+            names.append(k)
+            values.append(input_dict[k])
+        values = torch.stack(values, dim=0)
+        dist.all_reduce(values)
+        if average:
+            values /= world_size
+        reduced_dict = {k: v for k, v in zip(names, values)}
+    return reduced_dict

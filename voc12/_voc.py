@@ -18,7 +18,6 @@ from torch.utils.data import Dataset
 from torchvision import transforms
 import torchvision.transforms.functional as F
 
-import utils
 
 _pil_interpolation_to_str = {
     Image.NEAREST: 'PIL.Image.NEAREST',
@@ -39,39 +38,13 @@ ANNOT_FOLDER_NAME = "Annotations"
 DEPTH_FOLDER_NAME = "Depth"
 
 
-def load_image_label_from_xml(img_name, voc12_root):
-    from xml.dom import minidom
-
-    el_list = minidom.parse(os.path.join(voc12_root, ANNOT_FOLDER_NAME, img_name + '.xml')).getElementsByTagName('name')
-
-    multi_cls_lab = np.zeros(20, np.float32)
-
-    for el in el_list:
-        cat_name = el.firstChild.data
-        if cat_name in CAT_LIST:
-            cat_num = CAT_NAME_TO_NUM[cat_name]
-            multi_cls_lab[cat_num] = 1.0
-
-    return multi_cls_lab
-
-
-def load_image_label_list_from_xml(img_name_list, voc12_root):
-    return [load_image_label_from_xml(img_name, voc12_root) for img_name in img_name_list]
-
-
-def load_image_label_list_from_npy(img_name_list):
-    cls_labels_dict = np.load('voc12/cls_labels.npy', allow_pickle=True).item()
-    return [cls_labels_dict[img_name] for img_name in img_name_list]
-
-
 def get_img_path(img_name, voc12_root):
     return os.path.join(voc12_root, IMG_FOLDER_NAME, img_name + '.jpg')
 
 
-def get_depth_path(img_name, voc12_root):
-    pfm_file_path = os.path.join(voc12_root, DEPTH_FOLDER_NAME, 'midas_v3.0', img_name + '.pfm')
-    png_file_path = os.path.join(voc12_root, DEPTH_FOLDER_NAME, 'midas_v3.0', img_name + '.png')
-    return pfm_file_path, png_file_path
+def load_image_label_list_from_npy(img_name_list, cls_gt_path):
+    cls_labels_dict = np.load(cls_gt_path, allow_pickle=True).item()
+    return [cls_labels_dict[img_name] for img_name in img_name_list]
 
 
 def load_img_name_list(dataset_path):
@@ -80,14 +53,19 @@ def load_img_name_list(dataset_path):
     return img_name_list
 
 
+def get_depth_path(img_name, voc12_root):
+    pfm_file_path = os.path.join(voc12_root, DEPTH_FOLDER_NAME, 'midas_v3.0', img_name + '.pfm')
+    png_file_path = os.path.join(voc12_root, DEPTH_FOLDER_NAME, 'midas_v3.0', img_name + '.png')
+    return pfm_file_path, png_file_path
+
+
 class VOC12ImageDataset(Dataset):
-    def __init__(self, img_name_list_path, voc12_root, transform=None, transform2=None):
+    def __init__(self, img_name_list_path, voc12_root, transform=None, cls_gt_path=None):
         self.img_name_list = load_img_name_list(img_name_list_path)
         self.voc12_root = voc12_root
         self.transform = transform
-        self.transform2 = transform2
-        self.croppings = 0
-        self.label_list = load_image_label_list_from_npy(self.img_name_list)
+        self.cls_gt_path = cls_gt_path if cls_gt_path else 'voc12/cls_labels.npy'
+        self.label_list = load_image_label_list_from_npy(self.img_name_list, self.cls_gt_path)
 
     def __len__(self):
         return len(self.img_name_list)
@@ -103,9 +81,10 @@ class VOC12ImageDataset(Dataset):
         if self.transform:
             img = self.transform(img)
 
-        label = torch.from_numpy(self.label_list[idx])
+        # Classification label with multi-hot encoding
+        class_label = torch.from_numpy(self.label_list[idx])
 
-        return name, img, label
+        return {'name': name, 'image': img, 'class_label': class_label}
 
 
 class VOC2012ClsDepthDataset(Dataset):

@@ -34,10 +34,7 @@ def cosine_scheduler(base_value, final_value, num_epochs, niter_per_epoch, warmu
 
 
 class LARS(torch.optim.Optimizer):
-    """
-    Almost copy-paste from https://github.com/facebookresearch/barlowtwins/blob/main/main.py
-    """
-
+    """ Almost copy-paste from https://github.com/facebookresearch/barlowtwins/blob/main/main.py """
     def __init__(
             self, params,
             lr=0, weight_decay=0, momentum=0.9, eta=0.001, weight_decay_filter=None, lars_adaptation_filter=None

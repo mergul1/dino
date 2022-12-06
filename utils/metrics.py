@@ -8,6 +8,7 @@ from utils.train_tools import *
 
 class SmoothedValue(object):
     """Track a series of values and provide access to smoothed values over a window or the global series average. """
+
     def __init__(self, window_size=20, fmt=None):
         if fmt is None:
             fmt = "{median:.6f} ({global_avg:.6f})"
@@ -313,7 +314,7 @@ def compute_map(ranks, gnd, kappas=()):
          3) If there are no positive images for some query, that query is excluded from the evaluation
     """
 
-    mAP = 0.
+    mean_ap = 0.
     num_queries = len(gnd)  # number of queries
     aps = np.zeros(num_queries)
     pr = np.zeros(len(kappas))
@@ -332,7 +333,7 @@ def compute_map(ranks, gnd, kappas=()):
 
         try:
             query_gnd_j = np.array(gnd[i]['junk'])
-        except:
+        except IndexError:
             query_gnd_j = np.empty(0)
 
         # sorted positions of positive and junk images (0 based)
@@ -353,7 +354,7 @@ def compute_map(ranks, gnd, kappas=()):
 
         # compute ap
         ap = compute_ap(pos, len(query_gnd))
-        mAP = mAP + ap
+        mean_ap = mean_ap + ap
         aps[i] = ap
 
         # compute precision @ k
@@ -363,7 +364,17 @@ def compute_map(ranks, gnd, kappas=()):
             prs[i, j] = (pos <= kq).sum() / kq
         pr = pr + prs[i, :]
 
-    mAP = mAP / (num_queries - nempty)
+    mean_ap = mean_ap / (num_queries - nempty)
     pr = pr / (num_queries - nempty)
 
-    return mAP, aps, pr, prs
+    return mean_ap, aps, pr, prs
+
+
+def accuracy(output, target, top_k=(1,)):
+    """ Computes the accuracy over the k top predictions for the specified values of k """
+    max_k = max(top_k)
+    batch_size = target.size(0)
+    _, pred = output.topk(max_k, 1, True, True)
+    pred = pred.t()
+    correct = pred.eq(target.reshape(1, -1).expand_as(pred))
+    return [correct[:k].reshape(-1).float().sum(0) * 100. / batch_size for k in top_k]

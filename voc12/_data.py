@@ -6,7 +6,6 @@ import os.path
 import scipy.misc
 import cv2
 import matplotlib.pyplot as plt
-from tool import utils
 
 IMG_FOLDER_NAME = "JPEGImages"
 ANNOT_FOLDER_NAME = "Annotations"
