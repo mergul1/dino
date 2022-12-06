@@ -447,7 +447,7 @@ class RandomScaleMultiField(nn.Module):
 
 
 class ValCrop:
-    """Crop for validation."""
+    """ Crop for validation."""
     def __init__(self, patch_size, fill_value=0):
         self.patch_size = patch_size
         self.fill_value = fill_value

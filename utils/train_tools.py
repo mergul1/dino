@@ -289,8 +289,8 @@ def load_pretrained(model, args):
             except KeyError:
                 checkpoint_model = checkpoint
 
-            for key in ['head.weight', 'head.bias']:
-                if key in checkpoint_model and checkpoint_model[key].shape != model.state_dict()[key].shape:
+            for key in checkpoint_model.keys():
+                if 'head' in key and checkpoint_model[key].shape != model.state_dict()[key].shape:
                     print(f"Removing key {key} from pretrained checkpoint")
                     del checkpoint_model[key]
 

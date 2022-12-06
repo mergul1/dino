@@ -170,7 +170,7 @@ class CAMGenerator(VisionTransformer):
                 label = class_score.ge(0.0).to(torch.float)
 
             # Number of classes in the image
-            num_targets = torch.count_nonzero(label[0])
+            num_targets = torch.count_nonzero(label[0]).item()
             valid_classes = torch.nonzero(label[0], as_tuple=True)[0]
 
         # Class Attention Map
@@ -178,8 +178,7 @@ class CAMGenerator(VisionTransformer):
         for idx, class_idx in enumerate(valid_classes):
             # Forward propagation
             class_score = self.forward(img, register_hook=True)
-            plt.imshow(img[0, 0].cpu())
-            plt.show()
+
             # Backward propagation
             self.zero_grad()
             out_grad = F.one_hot(valid_classes, args.num_classes)
@@ -202,7 +201,7 @@ class CAMGenerator(VisionTransformer):
                 class_attention_map.unsqueeze(dim=1), scale_factor=self.patch_size, mode='bilinear', align_corners=False
             ).squeeze(dim=1).relu()
 
-            # Normalize the class-wise CAM
+            # Normalize the class_wise CAMs
             normalized_map = min_max_normalizer(resized_class_map)
             cam[0, class_idx] = normalized_map
 

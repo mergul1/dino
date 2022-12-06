@@ -16,7 +16,7 @@ DEPTH_FOLDER_NAME = "Depth"
 
 CAT_LIST = [
     'aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat', 'chair', 'cow', 'diningtable', 'dog',
-    'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor'
+    'horse', 'motorbike', 'person', 'potted-plant', 'sheep', 'sofa', 'train', 'tvmonitor'
 ]
 CAT_NAME_TO_NUM = dict(zip(CAT_LIST, range(len(CAT_LIST))))
 
@@ -114,6 +114,7 @@ class VOC12ImageDatasetMSF(Dataset):
 
 
 if __name__ == '__main__':
+    print(plt.get_backend())
     train_list = 'train_aug.txt'
     voc12 = '/home/mergul/Desktop/VOC2012'
     gt_path = 'cls_labels.npy'
@@ -124,7 +125,7 @@ if __name__ == '__main__':
         transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
     ])
     dataset = VOC12ImageDatasetMSF(train_list, voc12, scales=(1.0, 1.5), cls_gt_path=gt_path, transform=transforms)
-    data = dataset.__getitem__(100)
+    data = dataset.__getitem__(50)
     print(data['image_list'][0].shape)
     print(data['image_list'][2].shape)
     print(data['image_list'][0].mean((1, 2)))

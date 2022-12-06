@@ -21,6 +21,9 @@ from utils import misc, train_tools
 from voc12 import datasets, augmentations
 from arguments import common_arguments
 
+import matplotlib
+matplotlib.use(backend='Qt5Agg')
+
 
 def parse_inference_arguments():
     parser = argparse.ArgumentParser('ViT_WSL', parents=[common_arguments()])
@@ -106,7 +109,7 @@ def get_attention(process_id, model, dataset, args):
             # Extract image, label and affinity matrices (if exists)
             img_name = data['name'][0]
             label = data['class_label']
-            valid_classes = torch.nonzero(label, as_tuple=True)[0]
+            # valid_classes = torch.nonzero(label, as_tuple=True)[0]
 
             # Extract Attentions for each scale and flip
             resized_attentions = []
