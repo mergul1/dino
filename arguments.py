@@ -23,7 +23,7 @@ def common_arguments():
     parser.add_argument("--crop_size", default=480, type=int)
 
     parser.add_argument('--max_epochs', default=10, type=int, help="Number of epochs of training.")
-    parser.add_argument('--num_workers', default=0, type=int, help="Number of data loading workers per GPU.")
+    parser.add_argument('--num_workers', default=10, type=int, help="Number of data loading workers per GPU.")
 
     # -------------------------------------  Model parameters  ---------------------------------------------------------
     parser.add_argument('--pretrain_method', default='dino', type=str,
@@ -36,7 +36,7 @@ def common_arguments():
                         choices=['vit_tiny', 'vit_small', 'vit_base', 'vit_large', 'xcit'] + torchvision_archs
                                 + torch.hub.list("facebookresearch/xcit:main"),
                         help="""Name of architecture.""")
-    parser.add_argument('--mlp_head', default=True, type=misc.bool_flag, help="""Whether MLP head or Linear head will 
+    parser.add_argument('--mlp_head', default=False, type=misc.bool_flag, help="""Whether MLP head or Linear head will 
     be used during the classification""")
     parser.add_argument('--drop_path_rate', type=float, default=0., help="""stochastic depth rate""")
     parser.add_argument('--attn_drop_rate', type=float, default=0., help="""attention drop rate""")
@@ -62,7 +62,7 @@ def common_arguments():
     # -----------------------------------------------  Misc  -----------------------------------------------------------
     parser.add_argument('--seed', default=0, type=int, help="""Random seed.""")
     parser.add_argument('--mode', default="infer", type=str, choices=["train", "val", "eval", "infer"], help=""".""")
-    parser.add_argument('--exp_name', default="exp_wd0.1-1.0_per-layer-lr", type=str,
+    parser.add_argument('--exp_name', default="exp_lr1e-5", type=str,
                         help="The experiment name under the project")
 
     return parser

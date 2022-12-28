@@ -8,13 +8,14 @@ import torch.nn.functional as F
 from vision_transformer import VisionTransformer
 from utils.misc import min_max_normalizer
 from utils.train_tools import load_pretrained
+from utils.visualizations import ShowAttentions, show_cam_list
 
 
 def layer_aggregation(layer_matrices_list, aggregation_type='rollout1', start_layer=0, is_norm=False):
     def _min_max_normalizer(tensor_list):
         for idx, tensor in enumerate(tensor_list):
             tensor -= tensor.min()
-            tensor /= tensor.max()
+            tensor /= (tensor.max() + 1e-8)
             tensor_list[idx] = tensor
         return tensor_list
 
@@ -52,14 +53,7 @@ def layer_aggregation(layer_matrices_list, aggregation_type='rollout1', start_la
             class_cam = torch.prod(torch.stack(cam_list, dim=1), dim=1)
         else:
             raise ValueError(f'There is no such an aggregation type: {aggregation_type}')
-        return class_cam
-
-    elif aggregation_type in ['affinity', ]:
-        valid_layer_list = [layer_matrices for layer_matrices in layer_matrices_list[start_layer:]]
-        if is_norm:
-            valid_layer_list = _min_max_normalizer(valid_layer_list)
-        affinity = torch.mean(torch.stack(valid_layer_list, dim=0), dim=0)
-        return affinity
+        return class_cam, cam_list
 
     else:
         raise ValueError(f'There is no such an aggregation type: {aggregation_type}')
@@ -69,6 +63,7 @@ class CAMGenerator(VisionTransformer):
     def __init__(self, *args, **kwargs):
 
         super(CAMGenerator, self).__init__(*args, **kwargs)
+        self.orig_img = None
 
     def get_class_attention(self, x, args):
         # Evaluation mode
@@ -93,26 +88,50 @@ class CAMGenerator(VisionTransformer):
 
         return resized_class_attn, class_score
 
-    def get_attentions(self, args):
-        # Evaluation mode
-        self.eval()
+    def get_patchwise_affinity(self, args):
+        attns = [blk.attn.get_attn().detach() for idx, blk in enumerate(self.blocks) if idx >= args.start_layer_attns]
+        attn_list = [attn.relu().mean(dim=1) for attn in attns]
+        affinity = torch.mean(torch.stack(attn_list, dim=0), dim=0)  # B x N X N
+        patchwise_affinity = affinity[:, 1:, 1:]
+        return patchwise_affinity
 
-        # Forward Propagation
-        # class_score = self.forward(x, register_hook=True)
+    def get_attention_maps(self, args):
+        # Get attentions maps by averaging though heads for each layers
+        attn_list = [None] * len(self.blocks)
+        for idx, blk in enumerate(self.blocks):
+            if idx >= args.start_layer_attns:
+                attn = blk.attn.get_attn().detach()
+                attn_list[idx] = attn.relu().mean(dim=1)
+        # ShowAttentions(self.orig_img, attns[-2].mean(dim=1), self.patch_size)
+        return attn_list
 
-        # Get Attentions
-        attns = [blk.attn.get_attn().detach() for idx, blk in enumerate(self.blocks) if idx >= args.start_layer]
-        return attns
+    def get_gradient_maps(self, args):
+        # Get gradients maps
+        grad_list = [None] * len(self.blocks)
+        for idx, blk in enumerate(self.blocks):
+            if idx >= args.start_layer:
+                grad = blk.attn.get_attn_gradients().detach()
+                grad_list[idx] = grad.relu().mean(dim=1)
+        # ShowAttentions(self.orig_img, attns[-2].mean(dim=1), self.patch_size)
+        return grad_list
 
     def get_getam(self, args):
         getam_list = [None] * len(self.blocks)
-        attn_list = [None] * len(self.blocks)
-        grad_list = [None] * len(self.blocks)
         for idx, blk in enumerate(self.blocks):
             if idx >= args.start_layer:
                 # Get the attentions maps and attention-gradient maps for each layers
                 attn = blk.attn.get_attn().detach()
                 grad = blk.attn.get_attn_gradients().detach()
+
+                # ncols = 3
+                # fig, axs = plt.subplots(2, 3)
+                # for i in range(6):
+                #     axs[i//ncols, i % ncols].imshow(grad[0, i, 1:, 1:].relu().detach().cpu())
+                #     axs[i//ncols, i % ncols].axes.xaxis.set_ticks([])
+                #     axs[i//ncols, i % ncols].axes.yaxis.set_ticks([])
+                #     axs[i//ncols, i % ncols].set_title(f'Head: {i}')
+                # ShowAttentions(self.orig_img, attn.mean(dim=1, keepdims=True), self.patch_size)
+                # ShowAttentions(self.orig_img, attn, self.patch_size)
 
                 # Compute the gradient-weighted attention map
                 getam = attn * grad
@@ -121,52 +140,43 @@ class CAMGenerator(VisionTransformer):
                 else:
                     getam_list[idx] = getam.relu().mean(dim=1)
 
-                # Save attention maps for affinity
-                if args.is_refined:
-                    attn_list[idx] = attn.relu().mean(dim=1)
-                    grad_list[idx] = grad.relu().mean(dim=1)
-
-        return getam_list, attn_list, grad_list
+        return getam_list
 
     @staticmethod
-    def refinement_with_affinity(class_cam, attn_list, start_layer=11, beta=1, logt=0):
-
-        valid_layer_list = [layer_matrices for layer_matrices in attn_list[start_layer:]]
-        # if is_norm:
-        #     valid_layer_list = _min_max_normalizer(valid_layer_list)
-        attention_rollout = torch.mean(torch.stack(valid_layer_list, dim=0), dim=0)
-        affinity = attention_rollout[0, 1:, 1:]
+    def refinement_with_affinity(class_cam, patchwise_affinity, beta=1, logt=0):
+        # patchwise_affinity: layer mean of head mean of attention map
+        affinity = patchwise_affinity
         # patch_attention = attention_rollout[0, 1:, 1:]
         # affinity = patch_attention + patch_attention.t()
         # show_affinity(None, affinity.cpu(), feat_size)
         # affinity /= affinity.diag().unsqueeze(dim=1)
         # affinity /= affinity.max(dim=-1, keepdim=True)[0]
         # affinity = torch.clamp(affinity, min=0.0, max=1.0)
-        affinity = torch.pow(affinity, beta)
 
-        transition_prob = affinity / (affinity.sum(dim=-1, keepdim=True) + 1e-6)    # avoid nan
-        for _ in range(logt):
-            transition_prob = torch.matmul(transition_prob, transition_prob)
+        # affinity = torch.pow(affinity, beta)
+        # transition_prob = affinity / (affinity.sum(dim=-1, keepdim=True) + 1e-6)    # avoid nan
+        # for _ in range(logt):
+        #     transition_prob = torch.matmul(transition_prob, transition_prob)
 
-        # class_cam = torch.matmul(affinity, class_cam.permute(1, 0))
-        class_cam = torch.matmul(class_cam, transition_prob).t()
+        class_cam = torch.matmul(affinity, class_cam.permute(1, 0))
+        # class_cam = torch.matmul(transition_prob, class_cam.permute(1, 0))
 
         return class_cam
 
-    def get_cam(self, args, img, label=None):
+    def get_cam(self, args, img, label=None, orig_img=None):
         self.eval()
 
         batch_size, _, height, width = img.shape
         self.num_patch_height = height // self.patch_size
         self.num_patch_width = width // self.patch_size
+        self.orig_img = orig_img
 
         # Classification output prediction and infer the pseudo-label for classification
         with torch.no_grad():
             # If label is not given
             if label is None:
-                class_score = self.forward(img, register_hook=False)
-
                 print(f'True label is not given. The prediction label is inferred and used for pseudo mask generation')
+                class_score = self.forward(img, register_hook=False)
                 label = class_score.ge(0.0).to(torch.float)
 
             # Number of classes in the image
@@ -179,21 +189,46 @@ class CAMGenerator(VisionTransformer):
             # Forward propagation
             class_score = self.forward(img, register_hook=True)
 
-            # Backward propagation
-            self.zero_grad()
-            out_grad = F.one_hot(valid_classes, args.num_classes)
-            valid_class_score = out_grad.select(dim=0, index=idx).unsqueeze(dim=0) * class_score
-            valid_class_score.sum().backward()
-
-            # Get Class Attention Maps
-            getam_list, attn_list, grad_list = self.get_getam(args)
-            class_attention_map = layer_aggregation(
-                getam_list, aggregation_type=args.aggregation_type, start_layer=args.start_layer
-            )
-            if args.is_refined:
-                class_attention_map = self.refinement_with_affinity(
-                    class_attention_map, attn_list, args.start_layer, args.beta, args.logt
+            if args.method in ['attention_rollout', ]:
+                attn_list = self.get_attention_maps(args)
+                class_attention_map = layer_aggregation(
+                    attn_list, aggregation_type=args.agg_type, start_layer=args.start_layer
                 )
+            else:
+                # Backward propagation
+                self.zero_grad()
+                out_grad = F.one_hot(valid_classes, args.num_classes)
+                valid_class_score = out_grad.select(dim=0, index=idx).unsqueeze(dim=0) * class_score
+                valid_class_score.sum().backward()
+
+                # Compute Class Attention Maps
+                if args.method == 'getam_rollout':
+                    getam_list = self.get_getam(args)
+                    class_attention_map, cam_list = layer_aggregation(
+                        getam_list, aggregation_type=args.agg_type, start_layer=args.start_layer
+                    )
+                    if args.is_show and args.agg_type in ['mean', 'sum', 'product']:
+                        show_cam_list(
+                            class_attention_map, cam_list, height=self.num_patch_height, width=self.num_patch_width
+                        )
+
+                elif args.method == 'gradient_rollout':
+                    grad_list = self.get_gradient_maps(args)
+                    class_attention_map, cam_list = layer_aggregation(
+                        grad_list, aggregation_type=args.agg_type, start_layer=args.start_layer
+                    )
+                    if args.is_show and args.agg_type in ['mean', 'sum', 'product']:
+                        show_cam_list(
+                            class_attention_map, cam_list, height=self.num_patch_height, width=self.num_patch_width
+                        )
+
+                else:
+                    class_attention_map = None
+                    print(f'There is no such a method: {args.method}')
+
+            if args.is_refined:
+                affinity = self.get_patchwise_affinity(args)
+                class_attention_map = self.refinement_with_affinity(class_attention_map, affinity, args.beta, args.logt)
 
             # Reshape and resize the class attention map
             class_attention_map = class_attention_map.reshape(-1, self.num_patch_height, self.num_patch_width)
@@ -204,6 +239,11 @@ class CAMGenerator(VisionTransformer):
             # Normalize the class_wise CAMs
             normalized_map = min_max_normalizer(resized_class_map)
             cam[0, class_idx] = normalized_map
+            if args.is_show:
+                fig, axs = plt.subplots(nrows=1, ncols=2)
+                axs[0].imshow(orig_img)
+                axs[1].imshow(normalized_map[0].cpu())
+                plt.show()
 
             # Memory cleaning
             del class_score, normalized_map, resized_class_map, class_attention_map

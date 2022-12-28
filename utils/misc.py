@@ -10,7 +10,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 
-from train_tools import *
+from utils.train_tools import *
 
 
 def min_max_normalizer(tensor):

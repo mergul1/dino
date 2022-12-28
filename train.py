@@ -44,9 +44,9 @@ def parse_train_arguments():
     used during training)""")
     parser.add_argument('--min_lr', type=float, default=1e-7, help="""Target LR at the end of optimization.We use a 
     cosine LR schedule with linear warmup.""")
-    parser.add_argument('--weight_decay', type=float, default=0.1, help="""Initial value of the weight decay. 
+    parser.add_argument('--weight_decay', type=float, default=0.04, help="""Initial value of the weight decay. 
     With ViT, a smaller value at the beginning of training works well.""")
-    parser.add_argument('--weight_decay_end', type=float, default=1.0, help="""Final value of the weight decay.
+    parser.add_argument('--weight_decay_end', type=float, default=0.4, help="""Final value of the weight decay.
      We use a cosine schedule for WD and using a larger decay by the end of training improves performance for ViTs.""")
     parser.add_argument('--clip_grad', type=float, default=3., help="""Maximal parameter gradient norm if using gradient
      clipping. Clipping with norm .3 ~ 1.0 can help optimization for larger ViT architectures. 0 for disabling.""")

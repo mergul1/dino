@@ -164,9 +164,7 @@ class VisionTransformer(nn.Module):
         self.num_classes = num_classes
 
         # Patchify
-        self.patch_embed = PatchEmbed(
-            img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim
-        )
+        self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
         num_patches = self.patch_embed.num_patches
         self.num_patch_height = None
         self.num_patch_width = None
@@ -209,6 +207,10 @@ class VisionTransformer(nn.Module):
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
+
+    @torch.jit.ignore
+    def no_weight_decay(self):
+        return {'pos_embed', 'cls_token'}
 
     def get_params_groups_(self):
         regularized = []

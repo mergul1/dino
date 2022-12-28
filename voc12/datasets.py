@@ -21,6 +21,12 @@ CAT_LIST = [
 CAT_NAME_TO_NUM = dict(zip(CAT_LIST, range(len(CAT_LIST))))
 
 
+def get_depth_path(img_name, voc12_root):
+    pfm_file_path = os.path.join(voc12_root, 'Depth', 'midas_v3.0', img_name + '.pfm')
+    png_file_path = os.path.join(voc12_root, 'Depth', 'midas_v3.0', img_name + '.png')
+    return pfm_file_path, png_file_path
+
+
 def get_img_path(img_name, voc12_root):
     return os.path.join(voc12_root, IMG_FOLDER_NAME, img_name + '.jpg')
 
@@ -65,16 +71,12 @@ class VOC12ImageDataset(Dataset):
 
 
 class VOC12ImageDatasetMSF(Dataset):
-    def __init__(
-            self, img_name_list_path, voc12_root, scales=(1.,), cls_gt_path=None, is_flip=True,
-            transform=None, transform2=None
-    ):
+    def __init__(self, img_name_list_path, voc12_root, scales=(1.,), is_flip=True, cls_gt_path=None, transform=None):
         self.img_name_list = load_img_name_list(img_name_list_path)
         self.voc12_root = voc12_root
         self.scales = scales
         self.is_flip = is_flip
         self.transform = transform
-        self.transform2 = transform2
         self.cls_gt_path = cls_gt_path if cls_gt_path else 'voc12/cls_labels.npy'
         self.label_list = load_image_label_list_from_npy(self.img_name_list, self.cls_gt_path)
 
@@ -88,6 +90,12 @@ class VOC12ImageDatasetMSF(Dataset):
         # Read image as PIL
         img = Image.open(get_img_path(name, self.voc12_root)).convert("RGB")
         width, height = img.size
+        orig_img = np.array(img)
+
+        if width > 400 and height > 400:
+            (new_width, new_height) = (int(width * 0.75), int(height * 0.75))
+            img = img.resize((new_width, new_height))
+            print(f'{name} is resized to {(new_width, new_height)}')
 
         # Multi-scale and flip
         multi_scales_flipped_images = []
@@ -110,7 +118,7 @@ class VOC12ImageDatasetMSF(Dataset):
         if self.transform:
             multi_scales_flipped_images = [self.transform(img) for img in multi_scales_flipped_images]
 
-        return {'name': name, 'image_list': multi_scales_flipped_images, 'class_label': class_label}
+        return {'name': name, 'image_list': multi_scales_flipped_images, 'class_label': class_label, 'orig_img': orig_img}
 
 
 if __name__ == '__main__':

@@ -4,25 +4,43 @@ from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
+from PIL import Image
+import cv2
 
 import torch
 from torch.utils.data.dataset import Subset
 from torch.utils.data.dataloader import DataLoader
 from torch.backends import cudnn
 import torch.nn.functional as F
+import torch.multiprocessing as mp
 
 import torchvision
 from torchvision import models as torchvision_models
 from torchvision import transforms
+
+from chainercv.datasets import voc_semantic_segmentation_label_names, voc_semantic_segmentation_label_colors
+from chainercv.visualizations import vis_semantic_segmentation
 
 # import vision_transformer as vits
 import cam_generator as vits
 from utils import misc, train_tools
 from voc12 import datasets, augmentations
 from arguments import common_arguments
+from utils.visualizations import show_cam_on_image, show_cams_on_image
+from utils.cam_utils import crf_with_alpha, cam2label, eval_cam
 
 import matplotlib
 matplotlib.use(backend='Qt5Agg')
+
+is_show = True
+
+# alpha -> prob
+#   1   -> 0.5
+#   2   -> 0.38
+#   4   -> 0.275
+#   8   -> 0.188
+#  16   -> 0.122
+#  32   -> 0.078
 
 
 def parse_inference_arguments():
@@ -30,12 +48,13 @@ def parse_inference_arguments():
 
     # --------------------------------------  Dataset  ---------------------------------------------------
     parser.add_argument("--infer_list", default="voc12/train.txt", type=str)
-    parser.add_argument("--chainer_eval_set", default='val', choices=['train', 'val'], type=str)
     parser.add_argument('--eval_batch_size', default=1, type=int, help="""Batch-size: Number of distinct images loaded 
     on one batch during evaluation.""")
+    parser.add_argument("--chainer_eval_set", default='train', choices=['train', 'val'], type=str)
 
     # ----------------------------------  CAM or Pseudo-mask computation  ----------------------------------------------
-    parser.add_argument('--eval_epoch', default=1, type=int, help="The checkpoints for evaluation")
+    parser.add_argument('--eval_epoch', default=5, type=int, help="The checkpoints for evaluation")
+    parser.add_argument("--base_size", default=224, type=int)
 
     # Output directory
     parser.add_argument("--out_cam", default='out_cam', type=str, help="...")
@@ -43,29 +62,45 @@ def parse_inference_arguments():
     parser.add_argument("--out_pred", default='out_pred', type=str, help="...")
 
     # Post-process parameters
-    parser.add_argument('--multi_scales', default=(1.0,), type=tuple, help="Multi-scale factors for evaluation")
-    parser.add_argument("--alpha", default=4, type=int, help="..")
-    parser.add_argument("--low_alpha", default=4, type=int, help="..")
-    parser.add_argument("--high_alpha", default=16, type=int, help="..")
-    parser.add_argument('--mask_guided_crf', default=True, type=misc.bool_flag, help="...")
+    parser.add_argument('--multi_scales', default=(1.0, ), type=tuple,
+                        help="Multi-scale factors for evaluation")
+    parser.add_argument("--alpha", default=1, type=int,
+                        help="alpha (power) value to estimate background map from foreground maps, normal case")
+    parser.add_argument("--low_alpha", default=0.5, type=int,
+                        help="alpha (power) value to estimate background map from foreground maps, strong background")
+    parser.add_argument("--high_alpha", default=4, type=int,
+                        help="alpha (power) value to estimate background map from foreground maps, weak background")
+    parser.add_argument("--bg_thr", default=0.35, type=float,
+                        help="Background threshold for prediction, [0.0, 1.0]")
+    parser.add_argument('--mask_guided_crf', default=True, type=misc.bool_flag,
+                        help="Flag for whether the depth image is included in CRF or not")
 
     # Aggregation parameters
-    parser.add_argument("--method", default='attention_rollout', type=str,
+    parser.add_argument("--method", default='gradient_rollout', type=str,
                         choices=['full', 'second_layer', 'attn_gradcam',
-                                 'relevance_rollout', 'attention_rollout', 'gradient_rollout',
-                                 'attribution_rollout', 'getam_rollout'],
+                                 'getam_rollout', 'attention_rollout', 'gradient_rollout',
+                                 'attribution_rollout', 'relevance_rollout'],
                         help='')
-    parser.add_argument("--aggregation_type", default='sum', type=str,
+    parser.add_argument("--agg_type", default='sum', type=str,
                         choices=['rollout1', 'rollout2', 'sum', 'mean', 'hadamard'],
                         help="""How to aggregate relevances of the transformer layers""")
-    parser.add_argument('--start_layer', default=11, type=int, help="""From which transformer layer will be used 
-        in computation CAMs""")
-    parser.add_argument('--double_gradient', default=False, type=misc.bool_flag, help="...")
+    parser.add_argument('--start_layer', default=9, type=int,
+                        help="""From which transformer layer will be used in computation CAMs""")
+    parser.add_argument('--start_layer_attns', default=0, type=int,
+                        help="""From which transformer layer will be used in computation of affinity via Attentions""")
+    parser.add_argument('--double_gradient', default=False, type=misc.bool_flag,
+                        help="...")
 
     # Random Walk parameters
-    parser.add_argument('--is_refined', default=False, type=misc.bool_flag, help="...")
-    parser.add_argument("--logt", default=0, type=int, help='Number of iterations in random walk (in log space)')
-    parser.add_argument("--beta", default=2, type=int, help='Exponent number for transition probability in random walk')
+    parser.add_argument('--is_refined', default=True, type=misc.bool_flag,
+                        help="...")
+    parser.add_argument("--logt", default=6, type=int,
+                        help='Number of iterations in random walk (in log space)')
+    parser.add_argument("--beta", default=2, type=int,
+                        help='Exponent number for transition probability in random walk')
+
+    # Debugging
+    parser.add_argument('--is_show', default=False, type=misc.bool_flag, help='...')
 
     args = parser.parse_args()
 
@@ -79,7 +114,7 @@ def parse_inference_arguments():
 
     # Result Directory
     args.result_dir = args.output_dir.joinpath(
-        'results', args.method, args.aggregation_type, f'{args.start_layer}', f'ms:{args.multi_scales}'
+        'results', args.method, f'agg_{args.agg_type}', f'start_layer_{args.start_layer}', f'ms:{args.multi_scales}'
     )
     args.result_dir.mkdir(parents=True, exist_ok=True)
     args.out_cam = args.result_dir.joinpath(args.out_cam)
@@ -92,7 +127,7 @@ def parse_inference_arguments():
     return args
 
 
-def get_attention(process_id, model, dataset, args):
+def get_pseudo_mask(process_id, model, dataset, args):
     # Parameters
     num_gpus = torch.cuda.device_count()
 
@@ -109,10 +144,24 @@ def get_attention(process_id, model, dataset, args):
             # Extract image, label and affinity matrices (if exists)
             img_name = data['name'][0]
             label = data['class_label']
-            # valid_classes = torch.nonzero(label, as_tuple=True)[0]
+            orig_img = data['orig_img'][0].numpy()
+            orig_img_size = orig_img.shape[:2]
+            valid_classes = torch.nonzero(label[0], as_tuple=True)[0]
+
+            print(f"{idx}/{len(data_loader)} \t {img_name} \t {orig_img.shape}")
+            # if orig_img.shape[0] >= 400 and orig_img.shape[1] >= 400:
+            #     continue
+
+            if args.mask_guided_crf:
+                depth_img_path = datasets.get_depth_path(img_name, args.voc12_root)
+                depth_img = np.asarray(cv2.imread(depth_img_path[1]))
+                guidance_img = np.concatenate((orig_img, depth_img[:, :, 0:1]), axis=-1)
+                #     guidance_img = np.concatenate((orig_img, depth_img), axis=-1)
+            else:
+                guidance_img = orig_img
 
             # Extract Attentions for each scale and flip
-            resized_attentions = []
+            resized_cams = []
             if args.mask_guided:
                 pass
             else:
@@ -120,56 +169,121 @@ def get_attention(process_id, model, dataset, args):
                     _, _, height, width = img.shape
                     num_patches = (height // args.patch_size, width // args.patch_size)
 
-                    # Compute Class Attention Map
-                    cam = model.get_cam(args, img.cuda(non_blocking=True), label=label.cuda(non_blocking=True))
+                    # Compute Class Attention Map (CAM)
+                    cam = model.get_cam(
+                        args, img.cuda(non_blocking=True), label=label.cuda(non_blocking=True), orig_img=orig_img
+                    )
+                    # cam = model.get_cam(args, img.cuda(non_blocking=True))
 
-                    # # Compute Attention
-                    # attentions = model.get_attentions(img.cuda(non_blocking=True))
-                    # num_heads = attentions[-1].shape[1]
-                    # num_depths = len(attentions)
-                    # class_attns = attentions[-6][:, :, 0, 1:].reshape(1, -1, num_patches[0], num_patches[1])
+                    # Flip CAM, if necessary
+                    cam = cam.flip(-1) if i % 2 else cam   # sum or max?
 
-                    # fig, axs = plt.subplots(nrows=num_depths, ncols=num_heads)
-                    for r, attn in enumerate(cam):
-                        # class_attns = attn[0, :, 0, 1:].reshape(-1, num_patches[0], num_patches[1])
-                        class_attns = F.interpolate(
-                            class_attns.unsqueeze(dim=1), size=(height, width), mode='bilinear'
-                        ).squeeze(dim=1)
-                        fname = os.path.join(f"attn_{r}.png")
-                        plt.imsave(fname=fname, arr=class_attns.mean(dim=0).cpu(), format='png')
+                    # Scale CAM
+                    scale = args.multi_scales[i // 2]
+                    orig_rescaled_size = [round(s * scale) for s in orig_img_size]
+                    cam = cam[:, :, :orig_rescaled_size[0], :orig_rescaled_size[1]]
+                    cam = F.interpolate(cam, orig_img_size, mode='bilinear', align_corners=False)
+                    resized_cams.append(cam.cpu())
 
-                        # for c, attn_head in enumerate(class_attns):
-                        #     attn_head = (attn_head - attn_head.min()) / (attn_head.max()-attn_head.min())
-                        #     axs[r, c].imshow(attn_head.cpu(), cmap='plasma')
-                        #     axs[r, c].set_title(f'{r}-{c}')
-                        #     # plt.imshow(attn_head.cpu())
-                        #     plt.show()
-                    # for ax in axs.flat:
-                    #     ax.label_outer()
+            # Show CAMs
+            if is_show:
+                show_cams_on_image(orig_img, resized_cams, valid_classes)
 
-                    # plt.show()
-                    print('deneme')
+            # Integrate multi-scale CAMs
+            cam = torch.sum(torch.cat(resized_cams, dim=0), dim=0, keepdim=True)
 
-                    # resized_attns = []
-                    # for class_attention in class_attns:
-                    #     scaled_attn = F.interpolate(
-                    #         class_attention.unsqueeze(dim=1), size=(height, width), mode='bilinear'
-                    #     ).squeeze().relu()
-                    #     resized_attns.append(scaled_attn)
-                    #     torchvision.utils.save_image(
-                    #         torchvision.utils.make_grid(img, normalize=True, scale_each=True), 'img.png'
-                    #     )
-                    #     for j in range(num_heads):
-                    #         fname = os.path.join("attn-head" + str(j) + ".png")
-                    #         plt.imsave(fname=fname, arr=scaled_attn[j].cpu(), format='png')
-                    #         print(f"{fname} saved.")
-                    #
-                    #     print('deneme')
-                    #
+            # Normalize CAMs
+            cam = cam + F.adaptive_max_pool2d(-cam, (1, 1))    # subtract min value
+            cam /= (F.adaptive_max_pool2d(cam, (1, 1)) + 1e-5)
+            norm_cam = cam[0].cpu().numpy()
+
+            # Show CAMs
+            if is_show:
+                show_cam_on_image(orig_img, norm_cam.take(valid_classes, axis=0))
+
+            # Save raw CAMs
+            if args.out_cam is not None:
+                show_cam_on_image(orig_img, norm_cam.take(valid_classes, axis=0), save_path=args.out_cam.joinpath(img_name + '.png'))
+
+                np.savez_compressed(
+                    args.out_cam.joinpath(img_name),
+                    valid_classes=valid_classes, cam=np.take(norm_cam, valid_classes, axis=0)
+                )
+
+            # Raw CAM and prediction mask
+            raw_cam, raw_pred = cam2label(norm_cam, valid_classes, alpha=args.alpha, bg_thr=args.bg_thr)
+            if is_show:
+                ax, legend_handles = vis_semantic_segmentation(
+                    orig_img.transpose((2, 0, 1)), raw_pred,
+                    label_names=voc_semantic_segmentation_label_names,
+                    label_colors=voc_semantic_segmentation_label_colors,
+                    alpha=0.7, all_label_names_in_legend=True
+                )
+                ax.legend(handles=legend_handles, bbox_to_anchor=(1, 1), loc=2)
+                plt.show()
+
+            if args.out_pred is not None:
+                plt.imsave(args.out_pred.joinpath(img_name + '.png'), raw_pred.astype(np.uint8))
+
+            # Predict the segmentation mask with CRF post-processing
+            if args.out_crf is not None:
+                # alpha
+                crf_alpha = crf_with_alpha(
+                    guidance_img, norm_cam=norm_cam, valid_classes=valid_classes, alpha=args.alpha,
+                    mask_guided=args.mask_guided_crf
+                )
+                crf_alpha_pred = np.argmax(crf_alpha, axis=0)
+                if is_show:
+                    ax, legend_handles = vis_semantic_segmentation(
+                        orig_img.transpose((2, 0, 1)), crf_alpha_pred,
+                        label_names=voc_semantic_segmentation_label_names,
+                        label_colors=voc_semantic_segmentation_label_colors,
+                        alpha=0.7, all_label_names_in_legend=True
+                    )
+                    ax.legend(handles=legend_handles, bbox_to_anchor=(1, 1), loc=2)
+                    plt.show()
+
+                # low alpha
+                crf_la = crf_with_alpha(
+                    guidance_img, norm_cam=norm_cam, valid_classes=valid_classes, alpha=args.low_alpha,
+                    mask_guided=args.mask_guided_crf
+                )
+                crf_la_pred = np.argmax(crf_la, axis=0)
+                if is_show:
+                    ax, legend_handles = vis_semantic_segmentation(
+                        orig_img.transpose((2, 0, 1)), crf_la_pred,
+                        label_names=voc_semantic_segmentation_label_names,
+                        label_colors=voc_semantic_segmentation_label_colors,
+                        alpha=0.7, all_label_names_in_legend=True
+                    )
+                    ax.legend(handles=legend_handles, bbox_to_anchor=(1, 1), loc=2)
+                    plt.show()
+
+                # High alpha
+                crf_ha = crf_with_alpha(
+                    guidance_img, norm_cam=norm_cam, valid_classes=valid_classes, alpha=args.high_alpha,
+                    mask_guided=args.mask_guided_crf
+                )
+                crf_ha_pred = np.argmax(crf_ha, axis=0)
+                if is_show:
+                    ax, legend_handles = vis_semantic_segmentation(
+                        orig_img.transpose((2, 0, 1)), crf_ha_pred,
+                        label_names=voc_semantic_segmentation_label_names,
+                        label_colors=voc_semantic_segmentation_label_colors,
+                        alpha=0.7, all_label_names_in_legend=True
+                    )
+                    ax.legend(handles=legend_handles, bbox_to_anchor=(1, 1), loc=2)
+                    plt.show()
+
+                # Save the segmentation predictions
+                np.savez_compressed(
+                    args.out_crf.joinpath(img_name),
+                    valid_classes=valid_classes, no_crf=raw_pred,   # refined=refined_pred,
+                    crf=crf_alpha_pred, crf_la=crf_la_pred, crf_ha=crf_ha_pred
+                )
 
 
 def make_pseudo_gt():
-
     # ================================ PARAMETERS =============================
     args = parse_inference_arguments()
     num_gpus = torch.cuda.device_count()
@@ -208,7 +322,6 @@ def make_pseudo_gt():
         print(f"Unknown architecture: {args.arch}")
         model = None
 
-    model = model.cuda()
     print(f"The model are built on {args.arch} network.")
 
     # ================================ LOAD MODEL CHECKPOINTS ... ================================
@@ -220,6 +333,15 @@ def make_pseudo_gt():
     model.eval()
 
     # ================================ MAKE CAM ===================================
-    get_attention(process_id=0, model=model, dataset=infer_datasets, args=args)
+    # get_pseudo_mask(process_id=0, model=model, dataset=infer_datasets, args=args)
+    mp.spawn(get_pseudo_mask, nprocs=num_gpus, args=(model, infer_datasets, args), join=True)
 
     torch.cuda.empty_cache()
+
+
+def eval_pseudo_gt():
+    # ================================ PARAMETERS =============================
+    args = parse_inference_arguments()
+    num_gpus = torch.cuda.device_count()
+
+    eval_cam(args)

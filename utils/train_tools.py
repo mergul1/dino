@@ -88,6 +88,7 @@ def init_distributed_mode(args):
 def restart_from_checkpoint(ckp_path, run_variables=None, **kwargs):
     """ Re-start from checkpoint """
     if not os.path.isfile(ckp_path):
+        print(f'\n Not found the specified checkpoint at {ckp_path}')
         return
     print("Found checkpoint at {}".format(ckp_path))
 
@@ -104,7 +105,7 @@ def restart_from_checkpoint(ckp_path, run_variables=None, **kwargs):
                 checkpoint[key] = {k.replace("module.", ""): v for k, v in checkpoint[key].items()}
 
                 # load value to the module
-                msg = value.load_state_dict(checkpoint[key], strict=False)
+                msg = value.load_state_dict(checkpoint[key], strict=True)
                 print("=> loaded '{}' from checkpoint '{}' with msg {}".format(key, ckp_path, msg))
             except TypeError:
                 try:
@@ -289,10 +290,13 @@ def load_pretrained(model, args):
             except KeyError:
                 checkpoint_model = checkpoint
 
+            deleted_layers_name = []
             for key in checkpoint_model.keys():
                 if 'head' in key and checkpoint_model[key].shape != model.state_dict()[key].shape:
-                    print(f"Removing key {key} from pretrained checkpoint")
-                    del checkpoint_model[key]
+                    deleted_layers_name.append(key)
+            for key in deleted_layers_name:
+                print(f"Removing key {key} from pretrained checkpoint")
+                del checkpoint_model[key]
 
             msg = model.load_state_dict(checkpoint_model, strict=False)
             print('Pretrained weights found at {} in the hub and loaded with msg: {}'.format(url, msg))
