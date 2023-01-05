@@ -62,11 +62,11 @@ def parse_inference_arguments():
     parser.add_argument("--out_pred", default='out_pred', type=str, help="...")
 
     # Post-process parameters
-    parser.add_argument('--multi_scales', default=(1.0, ), type=tuple,
+    parser.add_argument('--multi_scales', default=(1.0, 0.5, 0.75), type=tuple,
                         help="Multi-scale factors for evaluation")
-    parser.add_argument("--alpha", default=1, type=int,
+    parser.add_argument("--alpha", default=2, type=int,
                         help="alpha (power) value to estimate background map from foreground maps, normal case")
-    parser.add_argument("--low_alpha", default=0.5, type=int,
+    parser.add_argument("--low_alpha", default=1, type=int,
                         help="alpha (power) value to estimate background map from foreground maps, strong background")
     parser.add_argument("--high_alpha", default=4, type=int,
                         help="alpha (power) value to estimate background map from foreground maps, weak background")
@@ -84,7 +84,7 @@ def parse_inference_arguments():
     parser.add_argument("--agg_type", default='sum', type=str,
                         choices=['rollout1', 'rollout2', 'sum', 'mean', 'hadamard'],
                         help="""How to aggregate relevances of the transformer layers""")
-    parser.add_argument('--start_layer', default=9, type=int,
+    parser.add_argument('--start_layer', default=11, type=int,
                         help="""From which transformer layer will be used in computation CAMs""")
     parser.add_argument('--start_layer_attns', default=0, type=int,
                         help="""From which transformer layer will be used in computation of affinity via Attentions""")

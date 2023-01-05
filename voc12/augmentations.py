@@ -4,6 +4,9 @@ import numbers
 from collections.abc import Sequence
 
 from PIL import Image, ImageFilter, ImageOps
+import numpy as np
+import scipy.ndimage as nd
+from scipy.spatial.distance import pdist, squareform
 
 import torch
 import torch.nn as nn
@@ -133,24 +136,23 @@ class ComposeMultiField:
     def __init__(self, transform_list):
         self.transforms = transform_list
 
-    def __call__(self, field_list):
+    def __call__(self, args):
         for t in self.transforms:
-            field_list = t(field_list)
-        return field_list
+            args = t(args)
+        return args
 
     def __repr__(self):
         format_string = self.__class__.__name__ + '('
         for t in self.transforms:
-            format_string += '\n'
-            format_string += '    {0}'.format(t)
+            format_string += f'\n {t}'
         format_string += '\n)'
         return format_string
 
 
 class RandomHorizontalFlipMultiField(nn.Module):
     """ Horizontally flip the given image and the depth image randomly with a given probability.
-    If the image and the depth image is torch Tensor, it is expected to have [..., H, W] shape,
-    where ... means an arbitrary number of leading dimensions.
+    If the image and the depth image is torch Tensor, it is expected to have [..., H, W] shape, where ... means
+    an arbitrary number of leading dimensions.
 
     Args:
         p (float): probability of the image being flipped. Default value is 0.5
@@ -172,17 +174,23 @@ class RandomHorizontalFlipMultiField(nn.Module):
             flipped_list = []
             for field in field_list:
                 num_channels, is_channel_first = check_channels(field)
-                is_hwc = num_channels == 3 and not is_channel_first
+                is_hwc = (num_channels == 3) and (not is_channel_first)
                 if is_hwc:
                     field = field.permute(2, 0, 1)
+
                 if num_channels == 1:
                     field = field.unsqueeze(dim=0)
+
                 field = F.hflip(field)
+
                 if num_channels == 1:
                     field = field.squeeze(dim=0)
+
                 if is_hwc:
                     field = field.permute(1, 2, 0)
+
                 flipped_list.append(field)
+
             return flipped_list
         return field_list
 
@@ -192,9 +200,8 @@ class RandomHorizontalFlipMultiField(nn.Module):
 
 class RandomCropMultiField(nn.Module):
     """ Crop the given images at a random location.
-    If the images is torch Tensor, it is expected to have [..., H, W] shape,
-    where ... means an arbitrary number of leading dimensions, but if non-constant padding is used,
-    the input is expected to have at most 2 leading dimensions
+     If the images is torch Tensor, it is expected to have [..., H, W] shape, where ... means an arbitrary number of
+     leading dimensions, but if non-constant padding is used, the input is expected to have at most 2 leading dimensions
 
     Args:
         crop_size (sequence or int): Desired output size of the crop. If size is an int instead of sequence like (h, w),
@@ -276,7 +283,7 @@ class RandomCropMultiField(nn.Module):
         padded_fields = []
         for field in field_list:
             num_channels, is_channel_first = check_channels(field)
-            is_hwc = num_channels == 3 and not is_channel_first
+            is_hwc = (num_channels == 3) and (not is_channel_first)
             if is_hwc:
                 field = field.permute(2, 0, 1)
 
@@ -296,6 +303,7 @@ class RandomCropMultiField(nn.Module):
 
             if is_hwc:
                 field = field.permute(1, 2, 0)
+
             padded_fields.append(field)
 
         width, height = F.get_image_size(padded_fields[0])
@@ -305,7 +313,7 @@ class RandomCropMultiField(nn.Module):
         cropped_fields = []
         for field in padded_fields:
             num_channels, is_channel_first = check_channels(field)
-            is_hwc = num_channels == 3 and not is_channel_first
+            is_hwc = (num_channels == 3) and (not is_channel_first)
             if is_hwc:
                 field = field.permute(2, 0, 1)
 
@@ -460,3 +468,106 @@ class ValCrop:
 
         return F.pad(x, padding=[0, 0, pad_width, pad_height], fill=self.fill_value)
 
+
+# ======================== AFFINITY ============================
+def create_position_feats(shape, yx_scale=None):
+    cord_range = [range(s) for s in shape]
+    mesh = np.array(np.meshgrid(*cord_range, indexing='ij'), dtype=np.float32)
+
+    if yx_scale is not None:
+        mesh = mesh * (1.0 / yx_scale)
+
+    return mesh
+
+
+def create_yxrgb(img, yx_scale=None, rgb_scale=None):
+    mesh = create_position_feats(img.shape[-2:], yx_scale)
+
+    if rgb_scale is not None:
+        img = img * (1.0 / rgb_scale)
+
+    feats = np.concatenate([mesh, img], axis=0)
+    return feats
+
+
+def create_yxd(depth, yx_scale=None, depth_scale=None):
+    mesh = create_position_feats(depth.shape[-2:], yx_scale)
+
+    if depth_scale is not None:
+        depth = depth * (1.0 / depth_scale)
+
+    feats = np.concatenate([mesh, np.expand_dims(depth, axis=0)], axis=0)
+    return feats
+
+
+def create_yxrgbd(img, depth, yx_scale=None, rgb_scale=None, depth_scale=None):
+    mesh = create_position_feats(img.shape[-2:], yx_scale)
+
+    if rgb_scale is not None:
+        img = img.astype(np.float32) * (1.0 / rgb_scale)
+
+    if depth_scale is not None:
+        depth = depth * (1.0 / depth_scale)
+
+    feats = np.concatenate([mesh, img, np.expand_dims(depth, axis=0)], axis=0)
+    return feats
+
+
+def compute_similarity(
+        orig_img, inverse_depth, croppings=None, feature_type='RGBD',
+        scale_factor=8, sigma_xy=80, sigma_rgb=13, sigma_depth=6000
+):
+    height, width, _ = orig_img.shape
+    feature_size = (math.ceil(height/scale_factor), math.ceil(width/scale_factor))
+    feature_numel = feature_size[0] * feature_size[1]
+
+    # Resize image and depth
+    zooming_factor = (feature_size[0]/height, feature_size[1]/width)
+    img_reduced = nd.zoom(orig_img, zoom=zooming_factor+(1,), order=3).astype(np.float32).transpose((2, 0, 1))
+    depth_reduced = nd.zoom(inverse_depth, zoom=zooming_factor, order=3).astype(np.float32)
+
+    if feature_type == 'RGBD':
+        # Extract RGBD features
+        features = create_yxrgbd(
+            img_reduced, depth_reduced,
+            yx_scale=sigma_xy/scale_factor, rgb_scale=sigma_rgb, depth_scale=sigma_depth
+        )
+    elif feature_type == "RGB":
+        # Extract RGB features
+        features = create_yxrgb(img_reduced, yx_scale=sigma_xy / scale_factor, rgb_scale=sigma_rgb)
+    elif feature_type == 'D':
+        features = create_yxd(depth_reduced, yx_scale=sigma_xy / scale_factor, depth_scale=sigma_depth)
+    else:
+        raise ValueError(f'There is no such a feature type: {feature_type}')
+
+    distance_matrix = pdist(np.reshape(features, (features.shape[0], feature_numel)).transpose(), metric='sqeuclidean')
+    similarity_map = squareform(np.exp(-distance_matrix / 2.0))
+
+    if croppings is not None:
+        croppings_reduced = nd.zoom(croppings, zoom=zooming_factor, order=0)
+        crop_tile = np.tile(np.reshape(croppings_reduced, (feature_numel, -1)), (1, feature_numel))
+        crop_mask = crop_tile * crop_tile.transpose()
+        similarity_map = similarity_map * crop_mask
+
+    # show_sim(idx=100, fg_sim=similarity_map, feat_size=feature_size, im_reduced=img_reduced, depth=depth_reduced)
+    show_similarity(img_reduced, similarity_map, feature_size, depth_reduced)
+    return similarity_map
+
+
+def show_similarity(img_reduced, sim, feat_size, depth):
+    import cv2
+    import matplotlib.pyplot as plt
+    def show_map(event, x, y, flags, params):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            sim_map = sim[y * feat_size[1] + x].reshape(feat_size[0], feat_size[1])
+            plt.figure('Affinity Map'), plt.imshow(sim_map)
+            plt.figure('Affinity Map2'), plt.imshow(sim_map > 0.1)
+
+            plt.figure('Depth'), plt.imshow(depth)
+            plt.show()
+
+    cv2.namedWindow('image', 2)
+    cv2.imshow('image', cv2.cvtColor(img_reduced.transpose(1, 2, 0).astype('uint8'), cv2.COLOR_RGB2BGR))
+    cv2.setMouseCallback('image', show_map)
+    cv2.waitKey(0)
+    cv2.destroyAllWindows()

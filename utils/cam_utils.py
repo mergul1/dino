@@ -167,7 +167,7 @@ def eval_cam(args):
 
 
 # ############################################# CRF INFERENCE ##########################################################
-def crf_inference(img, probs, t=10, scale_factor=1, num_labels=21, sigma_xy=80, sigma_rgb=13):
+def crf_inference(img, probs, t=10, scale_factor=1, num_labels=21, sigma_xy=80, sigma_rgb=130):
     height, width = img.shape[:2]
 
     d = dcrf.DenseCRF2D(width, height, num_labels)
@@ -185,7 +185,7 @@ def crf_inference(img, probs, t=10, scale_factor=1, num_labels=21, sigma_xy=80, 
     return np.array(Q).reshape((num_labels, height, width))
 
 
-def crf_inference_rgbd(img, probs, t=10, scale_factor=1, num_labels=21, sigma_xy=80, sigma_rgb=13, sigma_depth=15):
+def crf_inference_rgbd(img, probs, t=10, scale_factor=1, num_labels=21, sigma_xy=80, sigma_rgb=130, sigma_depth=25):
     height, width = img.shape[:2]
 
     d = dcrf.DenseCRF2D(width, height, num_labels)
