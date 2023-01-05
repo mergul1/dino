@@ -3,6 +3,7 @@ import math
 import numbers
 from collections.abc import Sequence
 
+import matplotlib.pyplot as plt
 from PIL import Image, ImageFilter, ImageOps
 import numpy as np
 import scipy.ndimage as nd
@@ -14,6 +15,10 @@ import torch.nn.functional as F
 from torchvision import transforms
 from torchvision.transforms import functional as F
 from torchvision.transforms import InterpolationMode
+
+import matplotlib
+matplotlib.use(backend='Qt5Agg')
+plt.ion()
 
 
 def check_channels(img):
@@ -515,7 +520,7 @@ def create_yxrgbd(img, depth, yx_scale=None, rgb_scale=None, depth_scale=None):
 
 def compute_similarity(
         orig_img, inverse_depth, croppings=None, feature_type='RGBD',
-        scale_factor=8, sigma_xy=80, sigma_rgb=13, sigma_depth=6000
+        scale_factor=8, sigma_xy=180, sigma_rgb=130, sigma_depth=6500
 ):
     height, width, _ = orig_img.shape
     feature_size = (math.ceil(height/scale_factor), math.ceil(width/scale_factor))
@@ -555,19 +560,37 @@ def compute_similarity(
 
 
 def show_similarity(img_reduced, sim, feat_size, depth):
-    import cv2
-    import matplotlib.pyplot as plt
-    def show_map(event, x, y, flags, params):
-        if event == cv2.EVENT_LBUTTONDOWN:
-            sim_map = sim[y * feat_size[1] + x].reshape(feat_size[0], feat_size[1])
-            plt.figure('Affinity Map'), plt.imshow(sim_map)
-            plt.figure('Affinity Map2'), plt.imshow(sim_map > 0.1)
+    total_points = []
+    fig = plt.figure('Affinity Maps')
 
-            plt.figure('Depth'), plt.imshow(depth)
-            plt.show()
+    def show_affinity(event):
+        orig_x, orig_y = int(event.xdata), int(event.ydata)
+        print(f"orig_x: {orig_x} - orig_y:{orig_y}")
+        total_points.append((orig_x, orig_y))
+        num_points = len(total_points)
 
-    cv2.namedWindow('image', 2)
-    cv2.imshow('image', cv2.cvtColor(img_reduced.transpose(1, 2, 0).astype('uint8'), cv2.COLOR_RGB2BGR))
-    cv2.setMouseCallback('image', show_map)
-    cv2.waitKey(0)
-    cv2.destroyAllWindows()
+        fig.clear()
+        default_ncols = 3
+        ncols = default_ncols if num_points > default_ncols else num_points
+        nrows = math.ceil(num_points / ncols) if num_points > ncols else 1
+        axs = fig.subplots(nrows, ncols, squeeze=False)
+        for idx, pt in enumerate(total_points):
+            pointwise_affinity = sim[pt[1] * feat_size[1] + pt[0]].reshape(feat_size[0], feat_size[1])
+            axs[idx//ncols, idx % ncols].imshow(pointwise_affinity)
+            axs[idx//ncols, idx % ncols].plot(pt[0], pt[1], color='red', marker='*', markersize=5)
+            axs[idx//ncols, idx % ncols].axes.xaxis.set_ticks([])
+            axs[idx//ncols, idx % ncols].axes.yaxis.set_ticks([])
+        plt.show(block=True)
+
+    fig_image, axs_image = plt.subplots(nrows=1, ncols=2)
+    axs_image[0].imshow(img_reduced.transpose((1, 2, 0)).astype('uint8'))
+    axs_image[0].axes.xaxis.set_ticks([])
+    axs_image[0].axes.yaxis.set_ticks([])
+
+    axs_image[1].imshow(depth)
+    axs_image[1].axes.xaxis.set_ticks([])
+    axs_image[1].axes.yaxis.set_ticks([])
+
+    fig_image.canvas.mpl_connect('button_press_event', show_affinity)
+    plt.show(block=True)
+

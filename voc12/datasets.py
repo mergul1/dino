@@ -199,7 +199,7 @@ class VOC12ClsDepthDataset(Dataset):
 if __name__ == '__main__':
     print(plt.get_backend())
     train_list = 'train_aug.txt'
-    voc12 = '/home/mergul/Desktop/VOC2012'
+    voc12 = '/home/mergul/Desktop/VOCdevkit/VOC2012/'
     gt_path = 'cls_labels.npy'
     crop_size = 480
     # transforms = transforms.Compose([
@@ -217,7 +217,7 @@ if __name__ == '__main__':
     # print(data['image_list'][2].mean((1, 2)))
 
     depth_dataset = VOC12ClsDepthDataset(train_list, voc12_root=voc12, cls_gt_path=gt_path,
-                                         scale_factor=4, feature_type='RGBD', sigma_xy=None, sigma_rgb=130, sigma_depth=6500,
+                                         scale_factor=4, feature_type='D', sigma_xy=80, sigma_rgb=65, sigma_depth=6500,
                                          transform=transforms.Compose([
                                              transforms.ToTensor(),
                                              transforms.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1),
@@ -231,5 +231,5 @@ if __name__ == '__main__':
                                          ])
                                          )
 
-    data = depth_dataset.__getitem__(9978)
+    data = depth_dataset.__getitem__(190)
 
