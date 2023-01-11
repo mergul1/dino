@@ -29,6 +29,15 @@ def parse_train_arguments():
     parser.add_argument("--base_size", default=512, type=int)
     parser.add_argument("--scale_range", default=(0.8, 1.2), type=tuple)
 
+    parser.add_argument("--feature_type", default='RGBD', type=str, choices=['RGB', 'RGBD', 'D'],
+                        help="Depth based affinity matrices type")
+    parser.add_argument("--sigma_xy", default=230, type=int,
+                        help="Sigma value for Gaussian position kernel")
+    parser.add_argument("--sigma_rgb", default=130, type=int,
+                        help="Sigma value for Gaussian RGB kernel")
+    parser.add_argument("--sigma_depth", default=6500, type=int,
+                        help="Sigma value for Gaussian depth kernel")
+
     # ----------------------------------  Training/Optimization parameters  --------------------------------------------
     parser.add_argument('--use_fp16', type=misc.bool_flag, default=False, help="""Whether to use half-precision for 
     training. Improves training time/memory requirements, but can provoke instability and slight decay of performance.
@@ -85,21 +94,40 @@ def train():
         json.dump(config, args_file, indent=4)
 
     # ======================== DATASET ============================
-    train_dataset = datasets.VOC12ImageDataset(
-        args.train_list, voc12_root=args.voc12_root,
-        transform=transforms.Compose([
-            transforms.RandomAffine(degrees=0, scale=args.scale_range),
-            transforms.RandomCrop(size=args.crop_size, pad_if_needed=True),
-            transforms.RandomApply(
-                [transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)],
-                p=0.8
-            ),
-            transforms.RandomGrayscale(p=0.2),
-            transforms.RandomHorizontalFlip(p=0.5),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
-        ])
-    )
+    if args.mask_guided:
+        train_dataset = datasets.VOC12ClsDepthDataset(
+            args.train_list, voc12_root=args.voc12_root, scale_factor=args.patch_size, feature_type=args.feature_type,
+            sigma_xy=args.sigma_xy, sigma_rgb=args.sigma_rgb, sigma_depth=args.sigma_depth,
+            transform=transforms.Compose([
+                transforms.RandomApply(
+                    [transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)], p=0.8
+                ),
+                transforms.RandomGrayscale(p=0.2),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+            ]),
+            transform2=augmentations.ComposeMultiField([
+                augmentations.RandomScaleMultiField(scale_range=args.scale_range),
+                # ResizeMultiField(500),
+                augmentations.RandomCropMultiField(crop_size=args.crop_size, pad_if_needed=True),
+                augmentations.RandomHorizontalFlipMultiField()
+            ])
+        )
+    else:
+        train_dataset = datasets.VOC12ImageDataset(
+            args.train_list, voc12_root=args.voc12_root,
+            transform=transforms.Compose([
+                transforms.RandomAffine(degrees=0, scale=args.scale_range),
+                transforms.RandomCrop(size=args.crop_size, pad_if_needed=True),
+                transforms.RandomApply(
+                    [transforms.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)], p=0.8
+                ),
+                transforms.RandomGrayscale(p=0.2),
+                transforms.RandomHorizontalFlip(p=0.5),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+            ])
+        )
     train_dataloader = DataLoader(
         dataset=train_dataset,
         batch_size=args.train_batch_size,
@@ -183,15 +211,18 @@ def train():
 
     # ================================  RESUME TRAINING  ===============================
     to_restore = {"epoch": args.start_epoch}
-    train_tools.restart_from_checkpoint(
-        args.ckpt_dir.joinpath(f"checkpoint_{args.start_epoch:03}.pth"),
-        run_variables=to_restore,
-        model=model,
-        optimizer=optimizer,
-        fp16_scaler=fp16_scaler,
-        classification_loss=criterion
-    )
-    start_epoch = to_restore["epoch"]
+    if args.start_epoch > 0:
+        train_tools.restart_from_checkpoint(
+            args.ckpt_dir.joinpath(f"checkpoint_{args.start_epoch:03}.pth"),
+            run_variables=to_restore,
+            model=model,
+            optimizer=optimizer,
+            fp16_scaler=fp16_scaler,
+            classification_loss=criterion
+        )
+        start_epoch = to_restore["epoch"]
+    else:
+        start_epoch = 0
 
     # ================================  PARALLEL TRAINING  ===============================
     model = torch.nn.DataParallel(model).cuda()
@@ -273,9 +304,13 @@ def train_one_epoch(epoch, model, criterion, data_loader, optimizer, lr_schedule
         image_name = pack['name']
         image = pack['image'].cuda(non_blocking=True)
         class_label = pack['class_label'].cuda(non_blocking=True)
+        if args.mask_guided:
+            depth_mask = pack['affinity'].cuda(non_blocking=True)
+        else:
+            depth_mask = None
 
         # Forward pass + compute loss
-        class_output = model(image)
+        class_output = model(image, mask=depth_mask)
         loss = criterion(class_output, class_label)
         if not math.isfinite(loss.item()):
             print("Loss is {}, stopping training".format(loss.item()))

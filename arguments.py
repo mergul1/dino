@@ -23,14 +23,14 @@ def common_arguments():
     parser.add_argument("--crop_size", default=480, type=int)
 
     parser.add_argument('--max_epochs', default=10, type=int, help="Number of epochs of training.")
-    parser.add_argument('--num_workers', default=10, type=int, help="Number of data loading workers per GPU.")
+    parser.add_argument('--num_workers', default=0, type=int, help="Number of data loading workers per GPU.")
 
     # -------------------------------------  Model parameters  ---------------------------------------------------------
     parser.add_argument('--pretrain_method', default='dino', type=str,
                         choices=['dino', 'deit', 'deit_distilled', 'timm', 'cait', 'xcit'], help="Training methodology")
     parser.add_argument('--img_size', default=224, type=int, choices=[224, 384, 448], help="""Image size during the 
     training process""")
-    parser.add_argument('--patch_size', default=8, type=int, help="""Size in pixels of input square patches 
+    parser.add_argument('--patch_size', default=16, type=int, help="""Size in pixels of input square patches 
     - default 16 (for 16x16 patches)""")
     parser.add_argument('--arch', default='vit_small', type=str,
                         choices=['vit_tiny', 'vit_small', 'vit_base', 'vit_large', 'xcit'] + torchvision_archs
@@ -41,7 +41,7 @@ def common_arguments():
     parser.add_argument('--drop_path_rate', type=float, default=0., help="""stochastic depth rate""")
     parser.add_argument('--attn_drop_rate', type=float, default=0., help="""attention drop rate""")
     parser.add_argument('--drop_rate', type=float, default=0., help="""drop rate""")
-    parser.add_argument('--mask_guided', default=False, type=misc.bool_flag, help="...")
+    parser.add_argument('--mask_guided', default=True, type=misc.bool_flag, help="...")
 
     # ---------------------------------------  Resume Training/Pre-training  -------------------------------------------
     parser.add_argument('--start_epoch', default=0, type=int, help="""From what epochs the training start at resume""")
@@ -56,13 +56,13 @@ def common_arguments():
     parser.add_argument('--output_dir', default="output", type=str, help="Path to save the logs and outputs")
     parser.add_argument('--save_ckpt_freq', default=1, type=int, help="Save checkpoint every x epochs.")
 
-    parser.add_argument('--wandb', default="online", type=str, choices=["online", "offline", "disabled"], help="..")
+    parser.add_argument('--wandb', default='offline', type=str, choices=["online", "offline", "disabled"], help="..")
     parser.add_argument('--project_name', default="DINO_Classification", type=str, help="The project name")
 
     # -----------------------------------------------  Misc  -----------------------------------------------------------
     parser.add_argument('--seed', default=0, type=int, help="""Random seed.""")
-    parser.add_argument('--mode', default="infer", type=str, choices=["train", "val", "eval", "infer"], help=""".""")
-    parser.add_argument('--exp_name', default="exp_lr1e-5", type=str,
+    parser.add_argument('--mode', default="train", type=str, choices=["train", "val", "eval", "infer"], help=""".""")
+    parser.add_argument('--exp_name', default="depth_masked_training", type=str,
                         help="The experiment name under the project")
 
     return parser

@@ -95,13 +95,16 @@ class Attention(nn.Module):
     def get_attn_gradients(self):
         return self.attn_gradients
 
-    def forward(self, x, register_hook=False):
+    def forward(self, x, register_hook=False, mask=None):
         batch_size, num_tokens, embed_dims = x.shape
         qkv = self.qkv(x).reshape(batch_size, num_tokens, 3, self.num_heads, embed_dims // self.num_heads)
         qkv = qkv.permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
 
         attn = (q @ k.transpose(-2, -1)) * self.scale
+        if mask is not None:
+            mask = F.pad(mask, pad=(1, 0, 1, 0), mode='constant', value=1).unsqueeze(dim=1)
+            attn = attn * mask
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
 
@@ -128,8 +131,8 @@ class Block(nn.Module):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer, drop=drop)
 
-    def forward(self, x, register_hook=False):
-        y = self.attn(self.norm1(x), register_hook)
+    def forward(self, x, register_hook=False, mask=None):
+        y = self.attn(self.norm1(x), register_hook, mask)
         x = x + self.drop_path(y)
         x = x + self.drop_path(self.mlp(self.norm2(x)))
         return x
@@ -162,6 +165,7 @@ class VisionTransformer(nn.Module):
         self.num_features = self.embed_dim = embed_dim
         self.patch_size = patch_size
         self.num_classes = num_classes
+        self.mask_guided = mask_guided
 
         # Patchify
         self.patch_embed = PatchEmbed(img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim)
@@ -286,10 +290,10 @@ class VisionTransformer(nn.Module):
 
         return self.pos_drop(x)
 
-    def forward(self, x, register_hook=False):
+    def forward(self, x, register_hook=False, mask=None):
         x = self.prepare_tokens(x)
         for i, blk in enumerate(self.blocks):
-            x = blk(x, register_hook=register_hook)
+            x = blk(x, register_hook=register_hook, mask=mask)
 
         x = self.norm(x)
         class_token = x[:, 0]

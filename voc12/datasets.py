@@ -187,13 +187,13 @@ class VOC12ClsDepthDataset(Dataset):
             )
             return {
                 'name': name,
-                'img': input_list[0],
+                'image': input_list[0],
                 'class_label': class_label,
                 'orig_img': input_list[1],
-                'affinity': affinity
+                'affinity': affinity.astype('float32')
             }
         else:
-            return {'name': name, 'img': input_list[0], 'class_label': class_label, 'orig_img': input_list[1]}
+            return {'name': name, 'image': input_list[0], 'class_label': class_label, 'orig_img': input_list[1]}
 
 
 if __name__ == '__main__':
