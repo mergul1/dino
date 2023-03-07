@@ -1,4 +1,3 @@
-import time
 import math
 import numpy as np
 import matplotlib.pyplot as plt
@@ -27,7 +26,7 @@ def show_cam_on_image(img, masks, alpha=0.5, save_path=None):
     else:
         plt.imshow(grid)
         plt.xticks([]), plt.yticks([])
-        plt.show()
+        plt.show(block=True)
 
 
 def show_cams_on_image(img, masks, valid_classes=None, alpha=0.5, save_path=None):
@@ -50,7 +49,7 @@ def show_cams_on_image(img, masks, valid_classes=None, alpha=0.5, save_path=None
     else:
         plt.imshow(grid)
         plt.xticks([]), plt.yticks([])
-        plt.show()
+        plt.show(block=True)
 
 
 # def show_cam_on_image(img, mask, save_path):
@@ -88,7 +87,7 @@ def show_cam_list(class_cam, cam_list, height, width):
                 axs[i, j].imshow(cam)
                 axs[i, j].axes.xaxis.set_ticks([])
                 axs[i, j].axes.yaxis.set_ticks([])
-    plt.show()
+    plt.show(block=True)
 
 
 def show_attentions(attns, num_patch_height, num_patch_width, title='Attentions'):
@@ -98,7 +97,7 @@ def show_attentions(attns, num_patch_height, num_patch_width, title='Attentions'
     grid = make_grid(class_attn.unsqueeze(dim=1).expand(-1, 3, -1, -1), nrow=3, normalize=True, scale_each=True)
 
     plt.title(title)
-    plt.imshow(grid.permute(1, 2, 0)), plt.show()
+    plt.imshow(grid.permute(1, 2, 0)), plt.show(block=True)
 
 
 def show_affinity(img, affinity, feat_size):
@@ -107,7 +106,7 @@ def show_affinity(img, affinity, feat_size):
             sim_map = affinity[y * feat_size[1] + x].reshape(feat_size[0], feat_size[1])
             # cv2.namedWindow('Affinity Map', 2)
             # cv2.imshow('Affinity Map', sim_map)
-            plt.imshow(sim_map), plt.show()
+            plt.imshow(sim_map), plt.show(block=True)
 
     if img is None:
         img = np.zeros((feat_size[0], feat_size[1]), dtype=np.uint8)
@@ -135,7 +134,7 @@ class ShowAttentions:
         fig, ax = plt.subplots()
         ax.imshow(self.img)
         self.cid = fig.canvas.mpl_connect('button_press_event', self.pick_point)
-        plt.show()
+        plt.show(block=True)
 
     def pick_point(self, event):
         orig_x, orig_y = int(event.xdata), int(event.ydata)
@@ -172,5 +171,5 @@ class ShowAttentions:
             axs.axes.yaxis.set_ticks([])
             axs.set_title(f'Mean')
 
-        plt.show()
+        plt.show(block=True)
 

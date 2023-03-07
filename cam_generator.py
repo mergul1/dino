@@ -6,7 +6,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from vision_transformer import VisionTransformer
-from utils.misc import min_max_normalizer
+from utils.misc import min_max_normalizer, min_max_normalizer_clip
 from utils.train_tools import load_pretrained
 from utils.visualizations import ShowAttentions, show_cam_list
 
@@ -112,6 +112,7 @@ class CAMGenerator(VisionTransformer):
             if idx >= args.start_layer:
                 grad = blk.attn.get_attn_gradients().detach()
                 grad_list[idx] = grad.relu().mean(dim=1)
+                # grad_list[idx] = grad.mean(dim=1).relu()
         # ShowAttentions(self.orig_img, attns[-2].mean(dim=1), self.patch_size)
         return grad_list
 
@@ -143,9 +144,17 @@ class CAMGenerator(VisionTransformer):
         return getam_list
 
     @staticmethod
-    def refinement_with_affinity(class_cam, patchwise_affinity, beta=1, logt=0):
+    def refinement_with_affinity(class_cam, semantic_affinity, low_affinity, beta=1, logt=0, semantic_weight=1.0):
+
         # patchwise_affinity: layer mean of head mean of attention map
-        affinity = patchwise_affinity
+        batch_size, num_tokens, _ = low_affinity.shape
+        identity = torch.eye(num_tokens, device=low_affinity.device).expand(batch_size, -1, -1)
+        low_affinity = low_affinity + identity
+        low_affinity = low_affinity.softmax(dim=-1)
+
+        affinity = (1 - semantic_weight) * low_affinity + semantic_weight * semantic_affinity
+        affinity = affinity.softmax(dim=-1)
+
         # patch_attention = attention_rollout[0, 1:, 1:]
         # affinity = patch_attention + patch_attention.t()
         # show_affinity(None, affinity.cpu(), feat_size)
@@ -163,7 +172,7 @@ class CAMGenerator(VisionTransformer):
 
         return class_cam
 
-    def get_cam(self, args, img, label=None, orig_img=None):
+    def get_cam(self, args, img, label=None, orig_img=None, low_affinity=None):
         self.eval()
 
         batch_size, _, height, width = img.shape
@@ -227,8 +236,10 @@ class CAMGenerator(VisionTransformer):
                     print(f'There is no such a method: {args.method}')
 
             if args.is_refined:
-                affinity = self.get_patchwise_affinity(args)
-                class_attention_map = self.refinement_with_affinity(class_attention_map, affinity, args.beta, args.logt)
+                semantic_affinity = self.get_patchwise_affinity(args)
+                class_attention_map = self.refinement_with_affinity(
+                    class_attention_map, semantic_affinity, low_affinity, args.beta, args.logt, args.semantic_weight
+                )
 
             # Reshape and resize the class attention map
             class_attention_map = class_attention_map.reshape(-1, self.num_patch_height, self.num_patch_width)
@@ -243,7 +254,7 @@ class CAMGenerator(VisionTransformer):
                 fig, axs = plt.subplots(nrows=1, ncols=2)
                 axs[0].imshow(orig_img)
                 axs[1].imshow(normalized_map[0].cpu())
-                plt.show()
+                plt.show(block=True)
 
             # Memory cleaning
             del class_score, normalized_map, resized_class_map, class_attention_map

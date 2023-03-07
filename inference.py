@@ -32,9 +32,15 @@ from utils.cam_utils import crf_with_alpha, cam2label, eval_cam
 import matplotlib
 matplotlib.use(backend='Qt5Agg')
 
-is_show = True
+is_show = False
 
 # alpha -> prob
+# 0.1   -> 0.835
+# 0.2   -> 0.75
+# 0.3   -> 0.7
+# 0.4   -> 0.65
+# 0.5   -> 0.62
+# 0.8   -> 0.54
 #   1   -> 0.5
 #   2   -> 0.38
 #   4   -> 0.275
@@ -53,7 +59,7 @@ def parse_inference_arguments():
     parser.add_argument("--chainer_eval_set", default='train', choices=['train', 'val'], type=str)
 
     # ----------------------------------  CAM or Pseudo-mask computation  ----------------------------------------------
-    parser.add_argument('--eval_epoch', default=5, type=int, help="The checkpoints for evaluation")
+    parser.add_argument('--eval_epoch', default=10, type=int, help="The checkpoints for evaluation")
     parser.add_argument("--base_size", default=224, type=int)
 
     # Output directory
@@ -62,17 +68,19 @@ def parse_inference_arguments():
     parser.add_argument("--out_pred", default='out_pred', type=str, help="...")
 
     # Post-process parameters
-    parser.add_argument('--multi_scales', default=(1.0, 0.5, 0.75), type=tuple,
+    parser.add_argument('--multi_scales', default=(1.0,), type=tuple,
                         help="Multi-scale factors for evaluation")
+    parser.add_argument('--is_flip', default=True, type=misc.bool_flag,
+                        help="Flag for whether flipped image is evaluated for pseudo-mask generation")
     parser.add_argument("--alpha", default=2, type=int,
                         help="alpha (power) value to estimate background map from foreground maps, normal case")
     parser.add_argument("--low_alpha", default=1, type=int,
                         help="alpha (power) value to estimate background map from foreground maps, strong background")
     parser.add_argument("--high_alpha", default=4, type=int,
                         help="alpha (power) value to estimate background map from foreground maps, weak background")
-    parser.add_argument("--bg_thr", default=0.35, type=float,
+    parser.add_argument("--bg_thr", default=None, type=float,
                         help="Background threshold for prediction, [0.0, 1.0]")
-    parser.add_argument('--mask_guided_crf', default=True, type=misc.bool_flag,
+    parser.add_argument('--mask_guided_crf', default=False, type=misc.bool_flag,
                         help="Flag for whether the depth image is included in CRF or not")
 
     # Aggregation parameters
@@ -84,7 +92,7 @@ def parse_inference_arguments():
     parser.add_argument("--agg_type", default='sum', type=str,
                         choices=['rollout1', 'rollout2', 'sum', 'mean', 'hadamard'],
                         help="""How to aggregate relevances of the transformer layers""")
-    parser.add_argument('--start_layer', default=11, type=int,
+    parser.add_argument('--start_layer', default=10, type=int,
                         help="""From which transformer layer will be used in computation CAMs""")
     parser.add_argument('--start_layer_attns', default=0, type=int,
                         help="""From which transformer layer will be used in computation of affinity via Attentions""")
@@ -98,6 +106,8 @@ def parse_inference_arguments():
                         help='Number of iterations in random walk (in log space)')
     parser.add_argument("--beta", default=2, type=int,
                         help='Exponent number for transition probability in random walk')
+    parser.add_argument('--semantic_weight', default=1.0, type=float,
+                        help="Weight of semantic affinity w.r.t low-level affinity")
 
     # Debugging
     parser.add_argument('--is_show', default=False, type=misc.bool_flag, help='...')
@@ -114,7 +124,8 @@ def parse_inference_arguments():
 
     # Result Directory
     args.result_dir = args.output_dir.joinpath(
-        'results', args.method, f'agg_{args.agg_type}', f'start_layer_{args.start_layer}', f'ms:{args.multi_scales}'
+        'results', args.method, f'agg_{args.agg_type}', f'start_layer_{args.start_layer}', f'ms:{args.multi_scales}',
+        f'semantic_weight:{args.semantic_weight}'
     )
     args.result_dir.mkdir(parents=True, exist_ok=True)
     args.out_cam = args.result_dir.joinpath(args.out_cam)
@@ -130,6 +141,7 @@ def parse_inference_arguments():
 def get_pseudo_mask(process_id, model, dataset, args):
     # Parameters
     num_gpus = torch.cuda.device_count()
+    print(f"plot interactive: {plt.isinteractive()}")
 
     # Dataloader
     data_loader = DataLoader(dataset[process_id], shuffle=False, num_workers=0, pin_memory=True)
@@ -144,13 +156,13 @@ def get_pseudo_mask(process_id, model, dataset, args):
             # Extract image, label and affinity matrices (if exists)
             img_name = data['name'][0]
             label = data['class_label']
-            orig_img = data['orig_img'][0].numpy()
-            orig_img_size = orig_img.shape[:2]
             valid_classes = torch.nonzero(label[0], as_tuple=True)[0]
 
+            img_path = datasets.get_img_path(img_name, args.voc12_root)
+            orig_img = np.array(Image.open(img_path).convert('RGB'))
+            orig_img_size = orig_img.shape[:2]
+
             print(f"{idx}/{len(data_loader)} \t {img_name} \t {orig_img.shape}")
-            # if orig_img.shape[0] >= 400 and orig_img.shape[1] >= 400:
-            #     continue
 
             if args.mask_guided_crf:
                 depth_img_path = datasets.get_depth_path(img_name, args.voc12_root)
@@ -163,7 +175,28 @@ def get_pseudo_mask(process_id, model, dataset, args):
             # Extract Attentions for each scale and flip
             resized_cams = []
             if args.mask_guided:
-                pass
+                for i, (img, affinity) in enumerate(zip(data['image_list'], data['affinity'])):
+                    _, _, height, width = img.shape
+                    num_patches = (height // args.patch_size, width // args.patch_size)
+
+                    # Compute Class Attention Map (CAM)
+                    cam = model.get_cam(
+                        args, img.cuda(non_blocking=True), label=label.cuda(non_blocking=True), orig_img=orig_img,
+                        low_affinity=affinity.cuda(non_blocking=True)
+                    )
+
+                    # CLip CAM
+                    scale = args.multi_scales[i // 2]
+                    orig_rescaled_size = [round(s * scale) for s in orig_img_size]
+                    cam = cam[:, :, :orig_rescaled_size[0], :orig_rescaled_size[1]]
+
+                    # Flip CAM, if necessary
+                    cam = cam.flip(-1) if i % 2 else cam   # sum or max?
+
+                    # Scale CAM
+                    cam = F.interpolate(cam, orig_img_size, mode='bilinear', align_corners=False)
+                    resized_cams.append(cam.cpu())
+
             else:
                 for i, img in enumerate(data['image_list']):
                     _, _, height, width = img.shape
@@ -173,15 +206,16 @@ def get_pseudo_mask(process_id, model, dataset, args):
                     cam = model.get_cam(
                         args, img.cuda(non_blocking=True), label=label.cuda(non_blocking=True), orig_img=orig_img
                     )
-                    # cam = model.get_cam(args, img.cuda(non_blocking=True))
+
+                    # CLip CAM
+                    scale = args.multi_scales[i // 2]
+                    orig_rescaled_size = [round(s * scale) for s in orig_img_size]
+                    cam = cam[:, :, :orig_rescaled_size[0], :orig_rescaled_size[1]]
 
                     # Flip CAM, if necessary
                     cam = cam.flip(-1) if i % 2 else cam   # sum or max?
 
                     # Scale CAM
-                    scale = args.multi_scales[i // 2]
-                    orig_rescaled_size = [round(s * scale) for s in orig_img_size]
-                    cam = cam[:, :, :orig_rescaled_size[0], :orig_rescaled_size[1]]
                     cam = F.interpolate(cam, orig_img_size, mode='bilinear', align_corners=False)
                     resized_cams.append(cam.cpu())
 
@@ -203,7 +237,9 @@ def get_pseudo_mask(process_id, model, dataset, args):
 
             # Save raw CAMs
             if args.out_cam is not None:
-                show_cam_on_image(orig_img, norm_cam.take(valid_classes, axis=0), save_path=args.out_cam.joinpath(img_name + '.png'))
+                show_cam_on_image(
+                    orig_img, norm_cam.take(valid_classes, axis=0), save_path=args.out_cam.joinpath(img_name + '.png')
+                )
 
                 np.savez_compressed(
                     args.out_cam.joinpath(img_name),
@@ -220,13 +256,29 @@ def get_pseudo_mask(process_id, model, dataset, args):
                     alpha=0.7, all_label_names_in_legend=True
                 )
                 ax.legend(handles=legend_handles, bbox_to_anchor=(1, 1), loc=2)
-                plt.show()
+                plt.show(block=True)
 
             if args.out_pred is not None:
                 plt.imsave(args.out_pred.joinpath(img_name + '.png'), raw_pred.astype(np.uint8))
 
             # Predict the segmentation mask with CRF post-processing
             if args.out_crf is not None:
+                # # constant background
+                # crf_constant = crf_with_alpha(
+                #     guidance_img, norm_cam=norm_cam, valid_classes=valid_classes, bg_thr=args.bg_thr,
+                #     mask_guided=args.mask_guided_crf
+                # )
+                # crf_constant_pred = np.argmax(crf_constant, axis=0)
+                # if is_show:
+                #     ax, legend_handles = vis_semantic_segmentation(
+                #         orig_img.transpose((2, 0, 1)), crf_constant_pred,
+                #         label_names=voc_semantic_segmentation_label_names,
+                #         label_colors=voc_semantic_segmentation_label_colors,
+                #         alpha=0.7, all_label_names_in_legend=True
+                #     )
+                #     ax.legend(handles=legend_handles, bbox_to_anchor=(1, 1), loc=2)
+                #     plt.show(block=True)
+
                 # alpha
                 crf_alpha = crf_with_alpha(
                     guidance_img, norm_cam=norm_cam, valid_classes=valid_classes, alpha=args.alpha,
@@ -241,7 +293,7 @@ def get_pseudo_mask(process_id, model, dataset, args):
                         alpha=0.7, all_label_names_in_legend=True
                     )
                     ax.legend(handles=legend_handles, bbox_to_anchor=(1, 1), loc=2)
-                    plt.show()
+                    plt.show(block=True)
 
                 # low alpha
                 crf_la = crf_with_alpha(
@@ -257,7 +309,7 @@ def get_pseudo_mask(process_id, model, dataset, args):
                         alpha=0.7, all_label_names_in_legend=True
                     )
                     ax.legend(handles=legend_handles, bbox_to_anchor=(1, 1), loc=2)
-                    plt.show()
+                    plt.show(block=True)
 
                 # High alpha
                 crf_ha = crf_with_alpha(
@@ -273,7 +325,7 @@ def get_pseudo_mask(process_id, model, dataset, args):
                         alpha=0.7, all_label_names_in_legend=True
                     )
                     ax.legend(handles=legend_handles, bbox_to_anchor=(1, 1), loc=2)
-                    plt.show()
+                    plt.show(block=True)
 
                 # Save the segmentation predictions
                 np.savez_compressed(
@@ -290,10 +342,19 @@ def make_pseudo_gt():
 
     # ================================ DATASETS =============================
     if args.mask_guided:
-        infer_dataset = ...
+        infer_dataset = datasets.VOC12ClsDepthDatasetMSF(
+            args.infer_list, voc12_root=args.voc12_root, scales=args.multi_scales, is_flip=args.is_flip,
+            scale_factor=args.patch_size, feature_type=args.feature_type,
+            sigma_xy=args.sigma_xy, sigma_rgb=args.sigma_rgb, sigma_depth=args.sigma_depth,
+            transform=transforms.Compose([
+                transforms.ToTensor(),
+                augmentations.ValCrop(args.patch_size),
+                transforms.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225))
+            ])
+        )
     else:
         infer_dataset = datasets.VOC12ImageDatasetMSF(
-            args.infer_list, voc12_root=args.voc12_root, scales=args.multi_scales, is_flip=True,
+            args.infer_list, voc12_root=args.voc12_root, scales=args.multi_scales, is_flip=args.is_flip,
             transform=transforms.Compose([
                 # transforms.CenterCrop(args.base_size),
                 transforms.ToTensor(),

@@ -29,15 +29,6 @@ def parse_train_arguments():
     parser.add_argument("--base_size", default=512, type=int)
     parser.add_argument("--scale_range", default=(0.8, 1.2), type=tuple)
 
-    parser.add_argument("--feature_type", default='RGBD', type=str, choices=['RGB', 'RGBD', 'D'],
-                        help="Depth based affinity matrices type")
-    parser.add_argument("--sigma_xy", default=230, type=int,
-                        help="Sigma value for Gaussian position kernel")
-    parser.add_argument("--sigma_rgb", default=130, type=int,
-                        help="Sigma value for Gaussian RGB kernel")
-    parser.add_argument("--sigma_depth", default=6500, type=int,
-                        help="Sigma value for Gaussian depth kernel")
-
     # ----------------------------------  Training/Optimization parameters  --------------------------------------------
     parser.add_argument('--use_fp16', type=misc.bool_flag, default=False, help="""Whether to use half-precision for 
     training. Improves training time/memory requirements, but can provoke instability and slight decay of performance.

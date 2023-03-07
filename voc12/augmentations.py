@@ -1,6 +1,7 @@
 import random
 import math
 import numbers
+import re
 from collections.abc import Sequence
 
 import matplotlib.pyplot as plt
@@ -475,6 +476,56 @@ class ValCrop:
 
 
 # ======================== AFFINITY ============================
+def read_pfm(path):
+    """Read pfm file.
+
+    Args:
+        path (str): path to file
+
+    Returns:
+        tuple: (data, scale)
+    """
+
+    with open(path, "rb") as file:
+
+        color = None
+        width = None
+        height = None
+        scale = None
+        endian = None
+
+        header = file.readline().rstrip()
+        if header.decode("ascii") == "PF":
+            color = True
+        elif header.decode("ascii") == "Pf":
+            color = False
+        else:
+            raise Exception("Not a PFM file: " + path)
+
+        dim_match = re.match(r"^(\d+)\s(\d+)\s$", file.readline().decode("ascii"))
+        if dim_match:
+            width, height = list(map(int, dim_match.groups()))
+        else:
+            raise Exception("Malformed PFM header.")
+
+        scale = float(file.readline().decode("ascii").rstrip())
+        if scale < 0:
+            # little-endian
+            endian = "<"
+            scale = -scale
+        else:
+            # big-endian
+            endian = ">"
+
+        data = np.fromfile(file, endian + "f")
+        shape = (height, width, 3) if color else (height, width)
+
+        data = np.reshape(data, shape)
+        data = np.flipud(data)
+
+        return data, scale
+
+
 def create_position_feats(shape, yx_scale=None):
     cord_range = [range(s) for s in shape]
     mesh = np.array(np.meshgrid(*cord_range, indexing='ij'), dtype=np.float32)
@@ -531,6 +582,16 @@ def compute_similarity(
     img_reduced = nd.zoom(orig_img, zoom=zooming_factor+(1,), order=3).astype(np.float32).transpose((2, 0, 1))
     depth_reduced = nd.zoom(inverse_depth, zoom=zooming_factor, order=3).astype(np.float32)
 
+    # depth_std = nd.generic_filter(depth_reduced, np.std, size=3)
+    # depth_mean = nd.generic_filter(depth_reduced, np.mean, size=3)
+    # # depth_norm = depth_std**2 / depth_mean
+    # # depth_reduced /= (depth_norm + 1)
+    # # # depth_reduced = depth_norm
+    # # sigma_depth = depth_reduced.std()
+    #
+    # depth_reduced /= depth_std
+    # sigma_depth = depth_reduced.std()
+
     if feature_type == 'RGBD':
         # Extract RGBD features
         features = create_yxrgbd(
@@ -555,7 +616,7 @@ def compute_similarity(
         similarity_map = similarity_map * crop_mask
 
     # show_sim(idx=100, fg_sim=similarity_map, feat_size=feature_size, im_reduced=img_reduced, depth=depth_reduced)
-    show_similarity(img_reduced, similarity_map, feature_size, depth_reduced)
+    # show_similarity(img_reduced, similarity_map, feature_size, depth_reduced)
     return similarity_map
 
 

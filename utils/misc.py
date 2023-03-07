@@ -19,6 +19,13 @@ def min_max_normalizer(tensor):
     return tensor
 
 
+def min_max_normalizer_clip(tensor, max_clip=2.0):
+    tensor = tensor.clamp(max=max_clip)
+    tensor -= tensor.min()
+    tensor /= tensor.max()
+    return tensor
+
+
 def bool_flag(s):
     """ Parse boolean arguments from the command line. """
     falsy_strings = {"off", "false", "0"}

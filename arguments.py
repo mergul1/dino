@@ -30,7 +30,7 @@ def common_arguments():
                         choices=['dino', 'deit', 'deit_distilled', 'timm', 'cait', 'xcit'], help="Training methodology")
     parser.add_argument('--img_size', default=224, type=int, choices=[224, 384, 448], help="""Image size during the 
     training process""")
-    parser.add_argument('--patch_size', default=16, type=int, help="""Size in pixels of input square patches 
+    parser.add_argument('--patch_size', default=8, type=int, help="""Size in pixels of input square patches 
     - default 16 (for 16x16 patches)""")
     parser.add_argument('--arch', default='vit_small', type=str,
                         choices=['vit_tiny', 'vit_small', 'vit_base', 'vit_large', 'xcit'] + torchvision_archs
@@ -51,9 +51,20 @@ def common_arguments():
     parser.add_argument("--checkpoint_key", default="model", type=str, help="""Key to use in the checkpoint
     (example: "model")""")
 
+    # ---------------------------------------  Affinity Computation  ---------------------------------------------------
+    parser.add_argument("--feature_type", default='RGBD', type=str, choices=['RGB', 'RGBD', 'D'],
+                        help="Depth based affinity matrices type")
+    parser.add_argument("--sigma_xy", default=180, type=int,
+                        help="Sigma value for Gaussian position kernel")
+    parser.add_argument("--sigma_rgb", default=180, type=int,
+                        help="Sigma value for Gaussian RGB kernel")
+    parser.add_argument("--sigma_depth", default=6500, type=int,
+                        help="Sigma value for Gaussian depth kernel")
+
     # ----------------------------------  Checkpointing and Logging  ---------------------------------------------------
     parser.add_argument('--ckpt_dir', default="checkpoints", type=str, help="Path to save the logs and checkpoints.")
-    parser.add_argument('--output_dir', default="output", type=str, help="Path to save the logs and outputs")
+    parser.add_argument('--output_dir', default="/media/mergul/d08ac927-f143-4c4f-819c-6cd6dd6c2a3f/outputs/",
+                        type=str, help="Path to save the logs and outputs")
     parser.add_argument('--save_ckpt_freq', default=1, type=int, help="Save checkpoint every x epochs.")
 
     parser.add_argument('--wandb', default='offline', type=str, choices=["online", "offline", "disabled"], help="..")
@@ -61,8 +72,8 @@ def common_arguments():
 
     # -----------------------------------------------  Misc  -----------------------------------------------------------
     parser.add_argument('--seed', default=0, type=int, help="""Random seed.""")
-    parser.add_argument('--mode', default="train", type=str, choices=["train", "val", "eval", "infer"], help=""".""")
-    parser.add_argument('--exp_name', default="depth_masked_training", type=str,
+    parser.add_argument('--mode', default="infer", type=str, choices=["train", "val", "eval", "infer"], help=""".""")
+    parser.add_argument('--exp_name', default="exp_lr1e-5", type=str,
                         help="The experiment name under the project")
 
     return parser
